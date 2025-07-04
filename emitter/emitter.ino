@@ -15,11 +15,11 @@ void setup() {
   // OCR0A = 15;//F_CPU / 33000UL;          // ≈ 121 for ~33kHz
   // OCR0B = OCR0A / 2;                      // 50% duty cycle
 
-  // PB0 (pin 7) as input for TSOP receiver
+  // PB0 (pin 5) as input for TSOP receiver
   DDRB &= ~(1 << PB0);
   PORTB |= (1 << PB0);  // enable pull-up
 
-  // PB2 (pin 5) as output for visible LED
+  // PB2 (pin 7) as output for visible LED
   DDRB |= (1 << PB2);
   PORTB &= ~(1 << PB2);  // initially off
 }
