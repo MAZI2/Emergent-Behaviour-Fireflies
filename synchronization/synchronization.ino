@@ -8,22 +8,24 @@
 #define PHASE_STEP 1
 #define TICK_DELAY_MS 2
 #define JUMP_TO_FLASH_MARGIN 16
-#define JITTER_INTERVAL 8  // apply jitter every N ticks
+#define JITTER_INTERVAL 8
 
 // Pins
 #define IR_TX PB1
 #define IR_RX PB0
 #define LED   PB2
+#define BUZZER PB3
 
 void setup() {
-  DDRB |= (1 << IR_TX);   // IR emitter output
-  DDRB &= ~(1 << IR_RX);  // IR receiver input
-  PORTB |= (1 << IR_RX);  // pull-up
-  DDRB |= (1 << LED);     // visible LED output
-  PORTB &= ~(1 << LED);   // LED off
+  DDRB |= (1 << IR_TX);     // IR emitter output
+  DDRB &= ~(1 << IR_RX);    // IR receiver input
+  PORTB |= (1 << IR_RX);    // Pull-up on receiver
+  DDRB |= (1 << LED);       // LED output
+  DDRB |= (1 << BUZZER);    // Buzzer output
+  PORTB &= ~(1 << LED);     // LED off
+  PORTB &= ~(1 << BUZZER);  // Buzzer off
 
-  // Start Timer0 for jitter source
-  TCCR0B = (1 << CS01); // prescaler /8
+  TCCR0B = (1 << CS01);     // Timer0 for jitter
 }
 
 void emit_pulse(uint16_t cycles) {
@@ -35,10 +37,29 @@ void emit_pulse(uint16_t cycles) {
   }
 }
 
-void flash_led() {
-  PORTB |= (1 << LED);
-  _delay_ms(10);
-  PORTB &= ~(1 << LED);
+void flash_led_and_beep(uint8_t tone) {
+  uint8_t i;
+  for (i = 0; i < 100; i++) {
+    PORTB |= (1 << LED) | (1 << BUZZER);
+
+    // Delay ON time
+    switch (tone >> 6) {
+      case 0: _delay_us(250); break;  // tone < 64
+      case 1: _delay_us(200); break;  // tone < 128
+      case 2: _delay_us(150); break;  // tone < 192
+      default: _delay_us(100); break; // tone >= 192
+    }
+
+    PORTB &= ~((1 << LED) | (1 << BUZZER));
+
+    // Delay OFF time — same as ON to keep square wave
+    switch (tone >> 6) {
+      case 0: _delay_us(250); break;
+      case 1: _delay_us(200); break;
+      case 2: _delay_us(150); break;
+      default: _delay_us(100); break;
+    }
+  }
 }
 
 int main(void) {
@@ -52,10 +73,9 @@ int main(void) {
   while (1) {
     _delay_ms(TICK_DELAY_MS);
 
-    // Add jitter only every N ticks
     if (++jitter_tick >= JITTER_INTERVAL) {
       jitter_tick = 0;
-      uint8_t jitter = (TCNT0 >> 3) & 0x01;  // weak jitter: bit 3 of TCNT0
+      uint8_t jitter = (TCNT0 >> 3) & 0x01;
       phase += PHASE_STEP + jitter;
     } else {
       phase += PHASE_STEP;
@@ -63,18 +83,15 @@ int main(void) {
 
     if (phase > PHASE_MAX) phase = PHASE_MAX;
 
-    // Emit flash when threshold reached
     if (phase >= PHASE_MAX) {
       emit_pulse(200);
-      flash_led();
+      flash_led_and_beep(phase);
       phase = 0;
       refractory = 20;
     }
 
-    // Detect falling edge from IR receiver
     uint8_t current_rx = (PINB & (1 << IR_RX));
     if (last_rx_state && !current_rx && refractory == 0) {
-      // Only respond if phase > 25% full
       if (phase > (PHASE_MAX / 4)) {
         uint8_t delta = ((uint16_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
         phase += delta;
@@ -82,7 +99,7 @@ int main(void) {
 
         if (PHASE_MAX - phase < JUMP_TO_FLASH_MARGIN) {
           emit_pulse(200);
-          flash_led();
+          flash_led_and_beep(phase);
           phase = 0;
           refractory = 20;
         } else {
