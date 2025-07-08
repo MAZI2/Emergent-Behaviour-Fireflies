@@ -1,0 +1,12 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+BT1,TestPoint_2Pads_Pitch5.08mm_Drill1.3mm,1,BatteryHolder_2xAAA,
+BZ1,Buzzer_12x9.5RM7.6,1,Buzzer,
+C1,1206,1,0.1µF,
+D1,LED_D3.0mm,1,TSAL6200,
+D4,LED_D5.0mm-4_RGB_Wide_Pins,1,LiteOn_LTST-E563C,
+J1,TestPoint_Pad_1.0x1.0mm,1,Conn_01x01_Pin,
+R1,1206,1,47R,
+R2,1206,1,300R,
+R3,1206,1,100R,
+U1,DIP-8_W7.62mm_Socket,1,ATtiny85-20P,
+U2,Vishay_MINICAST-3Pin,1,TSOP382xx,
