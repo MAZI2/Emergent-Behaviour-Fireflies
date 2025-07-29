@@ -122,6 +122,8 @@ int main(void) {
 
     uint8_t current_rx = (PINB & (1 << IR_RX));
     if (last_rx_state && !current_rx && refractory == 0) {
+
+      // Why this if?
       if (phase > (PHASE_MAX / 4)) {
         uint8_t delta = ((uint16_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
         phase += delta;
