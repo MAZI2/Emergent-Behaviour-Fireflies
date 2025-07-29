@@ -6,7 +6,7 @@
 
 // NeoPixel definitions
 #include <Adafruit_NeoPixel.h>
-#define NEOPIXEL_PIN  PB1
+#define NEOPIXEL_PIN  PB2
 #define NUM_PIXELS    1
 Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -77,10 +77,19 @@ void flash_led_rgb() {
 
   strip.setPixelColor(0, strip.Color(r, g, b));
   strip.show();
-  _delay_ms(10);
+
+  // Buzzer tone generation for ~100ms at ~1kHz (1ms period = 0.5ms high + 0.5ms low)
+  for (uint16_t i = 0; i < 100; i++) {
+    PORTB |= (1 << BUZZER);  // Buzzer ON
+    _delay_us(500);          // 0.5ms
+    PORTB &= ~(1 << BUZZER); // Buzzer OFF
+    _delay_us(500);          // 0.5ms
+  }
+
   strip.setPixelColor(0, strip.Color(0, 0, 0));
   strip.show();
-} 
+}
+
 
 int main(void) {
   setup();
@@ -93,19 +102,20 @@ int main(void) {
   while (1) {
     _delay_ms(TICK_DELAY_MS);
 
-    if (++jitter_tick >= JITTER_INTERVAL) {
-      jitter_tick = 0;
-      uint8_t jitter = (TCNT0 >> 3) & 0x01;
-      phase += PHASE_STEP + jitter;
-    } else {
-      phase += PHASE_STEP;
-    }
+    // if (++jitter_tick >= JITTER_INTERVAL) {
+    //   jitter_tick = 0;
+    //   uint8_t jitter = (TCNT0 >> 3) & 0x01;
+    //   phase += PHASE_STEP + jitter;
+    // } else {
+    //   phase += PHASE_STEP;
+    // }
+    phase += PHASE_STEP;
 
     if (phase > PHASE_MAX) phase = PHASE_MAX;
 
     if (phase >= PHASE_MAX) {
       emit_pulse(200);
-      flash_led_and_beep(phase);
+      flash_led_rgb();
       phase = 0;
       refractory = 20;
     }
@@ -119,7 +129,7 @@ int main(void) {
 
         if (PHASE_MAX - phase < JUMP_TO_FLASH_MARGIN) {
           emit_pulse(200);
-          flash_led_and_beep(phase);
+          flash_led_rgb();
           phase = 0;
           refractory = 20;
         } else {
