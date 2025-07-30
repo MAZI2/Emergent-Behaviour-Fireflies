@@ -24,7 +24,32 @@ Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 #define LED   PB2
 #define BUZZER PB3
 
+volatile uint8_t buzzer_state = 0;
+volatile uint16_t buzzer_delay_us = 1000;
+
+// Toggle buzzer pin using Timer1 Compare Match A interrupt
+ISR(TIM1_COMPA_vect) {
+  if (buzzer_state) {
+    PORTB &= ~(1 << BUZZER);
+  } else {
+    PORTB |= (1 << BUZZER);
+  }
+  buzzer_state = !buzzer_state;
+}
+
+// Update buzzer frequency based on phase value
+void update_buzzer_frequency(uint8_t phase) {
+  // Map phase 0–255 to freq 200–4000Hz
+  uint16_t freq = 200 + ((3800UL * phase) / PHASE_MAX);
+  uint16_t half_period_us = 500000UL / freq;
+
+  cli();
+  OCR1A = (half_period_us > 255) ? 255 : (uint8_t)half_period_us; // Limited by 8-bit timer
+  sei();
+}
+
 void setup() {
+  // Configure pins
   DDRB |= (1 << IR_TX);     // IR emitter output
   DDRB &= ~(1 << IR_RX);    // IR receiver input
   PORTB |= (1 << IR_RX);    // Pull-up on receiver
@@ -33,7 +58,19 @@ void setup() {
   PORTB &= ~(1 << LED);     // LED off
   PORTB &= ~(1 << BUZZER);  // Buzzer off
 
-  TCCR0B = (1 << CS01);     // Timer0 for jitter
+  // Setup Timer1 for buzzer PWM toggle
+  TCCR1 = 0;
+  GTCCR = 0;
+  OCR1C = 255;
+  OCR1A = 125; // Start with 1kHz (approx)
+  TIMSK |= (1 << OCIE1A);     // Enable compare match A interrupt
+  TCCR1 |= (1 << CTC1) | (1 << CS10); // CTC mode, no prescaler
+
+  // NeoPixel begin
+  strip.begin();
+  strip.show();
+
+  sei(); // Enable global interrupts
 }
 
 void emit_pulse(uint16_t cycles) {
@@ -45,31 +82,6 @@ void emit_pulse(uint16_t cycles) {
   }
 }
 
-void flash_led_and_beep(uint8_t tone) {
-  uint8_t i;
-  for (i = 0; i < 100; i++) {
-    PORTB |= (1 << LED) | (1 << BUZZER);
-
-    // Delay ON time
-    switch (tone >> 6) {
-      case 0: _delay_us(250); break;  // tone < 64
-      case 1: _delay_us(200); break;  // tone < 128
-      case 2: _delay_us(150); break;  // tone < 192
-      default: _delay_us(100); break; // tone >= 192
-    }
-
-    PORTB &= ~((1 << LED) | (1 << BUZZER));
-
-    // Delay OFF time — same as ON to keep square wave
-    switch (tone >> 6) {
-      case 0: _delay_us(250); break;
-      case 1: _delay_us(200); break;
-      case 2: _delay_us(150); break;
-      default: _delay_us(100); break;
-    }
-  }
-}
-
 void flash_led_rgb() {
   uint8_t r = rand() % 256;
   uint8_t g = rand() % 256;
@@ -78,18 +90,11 @@ void flash_led_rgb() {
   strip.setPixelColor(0, strip.Color(r, g, b));
   strip.show();
 
-  // Buzzer tone generation for ~100ms at ~1kHz (1ms period = 0.5ms high + 0.5ms low)
-  for (uint16_t i = 0; i < 100; i++) {
-    PORTB |= (1 << BUZZER);  // Buzzer ON
-    _delay_us(500);          // 0.5ms
-    PORTB &= ~(1 << BUZZER); // Buzzer OFF
-    _delay_us(500);          // 0.5ms
-  }
+  _delay_ms(100); // Leave LED on briefly
 
   strip.setPixelColor(0, strip.Color(0, 0, 0));
   strip.show();
 }
-
 
 int main(void) {
   setup();
@@ -97,21 +102,14 @@ int main(void) {
   uint8_t phase = 0;
   uint8_t last_rx_state = (PINB & (1 << IR_RX));
   uint8_t refractory = 0;
-  uint8_t jitter_tick = 0;
 
   while (1) {
     _delay_ms(TICK_DELAY_MS);
 
-    // if (++jitter_tick >= JITTER_INTERVAL) {
-    //   jitter_tick = 0;
-    //   uint8_t jitter = (TCNT0 >> 3) & 0x01;
-    //   phase += PHASE_STEP + jitter;
-    // } else {
-    //   phase += PHASE_STEP;
-    // }
     phase += PHASE_STEP;
-
     if (phase > PHASE_MAX) phase = PHASE_MAX;
+
+    update_buzzer_frequency(phase); // Frequency modulated by phase
 
     if (phase >= PHASE_MAX) {
       emit_pulse(200);
@@ -122,8 +120,6 @@ int main(void) {
 
     uint8_t current_rx = (PINB & (1 << IR_RX));
     if (last_rx_state && !current_rx && refractory == 0) {
-
-      // Why this if?
       if (phase > (PHASE_MAX / 4)) {
         uint8_t delta = ((uint16_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
         phase += delta;
