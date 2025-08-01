@@ -64,7 +64,7 @@ uint8_t phase_index = 0;
 uint16_t PHASE_MAX = 255;
 
 uint16_t tick_counter = 0;
-#define SWITCH_INTERVAL_MS (1200000) // 4 minutes
+#define SWITCH_INTERVAL_MS (2400000) // 4 minutes
 #define TICKS_PER_SWITCH (SWITCH_INTERVAL_MS / TICK_DELAY_MS)
 
 // ===== FUNCTION PROTOTYPES =====
