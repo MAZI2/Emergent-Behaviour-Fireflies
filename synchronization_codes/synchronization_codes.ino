@@ -29,9 +29,9 @@ uint8_t PHASE_MAX = 255;
 // PB4
 
 // Sanguine gradient
-#define SANGUINE_START_R 100   // stronger red start
-#define SANGUINE_START_G 255    // add some green for orange warmth
-#define SANGUINE_START_B 100    // low blue
+#define SANGUINE_START_R 255   // stronger red start
+#define SANGUINE_START_G 0    // add some green for orange warmth
+#define SANGUINE_START_B 0    // low blue
 
 #define SANGUINE_END_R 255     // max red at end
 #define SANGUINE_END_G 183     // more green for bright orange
@@ -57,9 +57,9 @@ void setup_timer1_for_micros() {
   TIMSK |= (1 << TOIE1); // Enable overflow interrupt
 }
 volatile int32_t timer1_overflows = 0;
-// ISR(TIMER1_OVF_vect) {
-//   timer1_overflows++;
-// }
+ISR(TIMER1_OVF_vect) {
+  timer1_overflows++;
+}
 
 uint32_t my_micros() {
   uint8_t t;
@@ -99,7 +99,7 @@ void setup() {
   strip.clear();
   strip.show();
 
-  // setup_timer1_for_micros();
+  setup_timer1_for_micros();
 }
 
 void emit_pulse(uint16_t cycles) {
@@ -225,17 +225,17 @@ void beep(uint8_t tone) {
 }
 
 void flash_led_rgb() {
-  uint8_t r = rand() % 256;
-  uint8_t g = rand() % 256;
-  uint8_t b = rand() % 256;
+  uint8_t r = 255;//rand() % 256;
+  uint8_t g = 100; //rand() % 256;
+  uint8_t b = 0; //rand() % 256;
 
-  strip.setPixelColor(0, strip.Color(r, g, b));
+  strip.setPixelColor(0, strip.Color(g, r, b));
   strip.show();
 
-  _delay_ms(100);
+  // _delay_ms(100);
 
-  strip.setPixelColor(0, strip.Color(0, 0, 0));
-  strip.show();
+  // strip.setPixelColor(0, strip.Color(0, 0, 0));
+  // strip.show();
 }
 
 
@@ -278,36 +278,36 @@ int main(void) {
     if (phase > PHASE_MAX) phase = PHASE_MAX;
 
     if (phase >= PHASE_MAX) {
-      emit_pulse(200);
-      // send_code(175);
-      flash_led_rgb();
-      beep(phase);
+      // emit_pulse(200);
+      send_code(170);
+      // flash_led_rgb();
+      // beep(phase);
 
       phase = 0;
       refractory = 170;
     }
     
-    // phase_rgb_sanguine(phase);
-    
+    phase_rgb_sanguine(phase);
+    // flash_led_rgb();
     
     uint8_t current_rx = (PINB & (1 << IR_RX));
-    if (last_rx_state && !current_rx && refractory == 0) {
-      if (phase > (PHASE_MAX / 4)) {
-        uint8_t delta = ((uint16_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
-        phase += delta;
-        if (phase > PHASE_MAX) phase = PHASE_MAX;
+    // if (last_rx_state && !current_rx && refractory == 0) {
+    //   if (phase > (PHASE_MAX / 4)) {
+    //     uint8_t delta = ((uint16_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
+    //     phase += delta;
+    //     if (phase > PHASE_MAX) phase = PHASE_MAX;
 
-        // Check if close enough to flash immediately
-        if (PHASE_MAX - phase < JUMP_TO_FLASH_MARGIN) {
-          emit_pulse(200);
-          flash_led_rgb();
-          phase = 0;
-          refractory = 20;
-        } else {
-          refractory = 10;
-        }
-      }
-    }
+    //     // Check if close enough to flash immediately
+    //     if (PHASE_MAX - phase < JUMP_TO_FLASH_MARGIN) {
+    //       emit_pulse(200);
+    //       flash_led_rgb();
+    //       phase = 0;
+    //       refractory = 20;
+    //     } else {
+    //       refractory = 10;
+    //     }
+    //   }
+    // }
 
     if (refractory > 0) refractory--;
     last_rx_state = current_rx;
