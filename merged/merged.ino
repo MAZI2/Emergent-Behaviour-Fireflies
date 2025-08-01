@@ -46,19 +46,19 @@
 #define REFRACTORY_FLASH        20
 #define REFRACTORY_TRIGGER      10
 
-#define SANGUINE_START_R 100   // stronger red start
-#define SANGUINE_START_G 255    // add some green for orange warmth
-#define SANGUINE_START_B 100    // low blue
+const uint8_t GRADIENT_START_R[4] = {100, 255,   0, 200};
+const uint8_t GRADIENT_START_G[4] = {255, 255, 0, 210};
+const uint8_t GRADIENT_START_B[4] = {100,   0,   255,   0};
 
-#define SANGUINE_END_R 255     // max red at end
-#define SANGUINE_END_G 183     // more green for bright orange
-#define SANGUINE_END_B 0
+const uint8_t GRADIENT_END_R[4] = {255, 255,   0, 255};
+const uint8_t GRADIENT_END_G[4] = {183,   0,   255, 110};
+const uint8_t GRADIENT_END_B[4] = {  0, 255, 0,   0};
 
 // ===== GLOBAL VARIABLES =====
 Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // ===== Dynamic Phase Configuration =====
-const uint16_t PHASE_SEQUENCE[] = {255, 450, 170, 350, 200};
+const uint16_t PHASE_SEQUENCE[] = {255, 450, 210, 350};
 #define PHASE_SEQUENCE_LEN (sizeof(PHASE_SEQUENCE) / sizeof(PHASE_SEQUENCE[0]))
 uint8_t phase_index = 0;
 uint16_t PHASE_MAX = 255;
@@ -260,7 +260,6 @@ void delay_us_custom(uint16_t us) {
 
 /**
  * Executes chirp sequence
- * Creates RGB flash with ascending pitch chirp
  */
 void chirp(void) {
     uint16_t delay_val = CHIRP_BASE_DELAY;
@@ -294,30 +293,12 @@ void half_chirp() {
 }
 
 void set_fade_color(uint16_t phase, uint32_t diff) {
-    uint8_t r = SANGUINE_START_R + ((uint16_t)(SANGUINE_END_R - SANGUINE_START_R) * phase) / PHASE_MAX;
-    uint8_t g = SANGUINE_START_G + ((uint16_t)(SANGUINE_END_G - SANGUINE_START_G) * phase) / PHASE_MAX;
-    uint8_t b = SANGUINE_START_B + ((uint16_t)(SANGUINE_END_B - SANGUINE_START_B) * phase) / PHASE_MAX;
+    uint8_t i = phase_index;  // Current gradient index
 
-    // if (red) {
-    //   // r = 255;// * (1-(diff/1000000));
-    //   // g = 0;
-    //   // b = 0;
+    uint8_t r = GRADIENT_START_R[i] + ((uint16_t)(GRADIENT_END_R[i] - GRADIENT_START_R[i]) * phase) / PHASE_MAX;
+    uint8_t g = GRADIENT_START_G[i] + ((uint16_t)(GRADIENT_END_G[i] - GRADIENT_START_G[i]) * phase) / PHASE_MAX;
+    uint8_t b = GRADIENT_START_B[i] + ((uint16_t)(GRADIENT_END_B[i] - GRADIENT_START_B[i]) * phase) / PHASE_MAX;
 
-    //   if (diff < 10000000UL) {
-    //     // fade_factor goes from 1.0 (just turned red) to 0.0 (fully faded)
-    //     float fade_factor = 1.0 - ((float)diff / 10000000.0);
-    //     if (fade_factor < 0) fade_factor = 0;
-    //     if (fade_factor > 1) fade_factor = 1;
-
-    //     // Blend red with current color based on fade factor
-    //     r = (uint8_t)(r * (1.0 - fade_factor) + 255 * fade_factor);
-    //     g = (uint8_t)(g * (1.0 - fade_factor));
-    //     b = (uint8_t)(b * (1.0 - fade_factor));
-    //   }
-    // }
-
-    // if (r > 255) r = 255;
-    
     strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
     strip.show();
 }
@@ -378,9 +359,12 @@ int main(void) {
 
       if (code_num == 5) {
        // Freeze phase color at the moment of reception
-        uint8_t target_r = SANGUINE_START_R + ((uint16_t)(SANGUINE_END_R - SANGUINE_START_R) * phase) / PHASE_MAX;
-        uint8_t target_g = SANGUINE_START_G + ((uint16_t)(SANGUINE_END_G - SANGUINE_START_G) * phase) / PHASE_MAX;
-        uint8_t target_b = SANGUINE_START_B + ((uint16_t)(SANGUINE_END_B - SANGUINE_START_B) * phase) / PHASE_MAX;
+        uint8_t i = phase_index;  // use current gradient set
+
+        uint8_t target_r = GRADIENT_START_R[i] + ((uint16_t)(GRADIENT_END_R[i] - GRADIENT_START_R[i]) * phase) / PHASE_MAX;
+        uint8_t target_g = GRADIENT_START_G[i] + ((uint16_t)(GRADIENT_END_G[i] - GRADIENT_START_G[i]) * phase) / PHASE_MAX;
+        uint8_t target_b = GRADIENT_START_B[i] + ((uint16_t)(GRADIENT_END_B[i] - GRADIENT_START_B[i]) * phase) / PHASE_MAX;
+
 
         // Fade from red to frozen target color
         const uint8_t steps = 100;
