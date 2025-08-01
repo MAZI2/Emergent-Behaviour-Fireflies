@@ -58,13 +58,13 @@
 Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // ===== Dynamic Phase Configuration =====
-const uint16_t PHASE_SEQUENCE[] = {255, 500, 70, 350, 140};
+const uint16_t PHASE_SEQUENCE[] = {255, 450, 170, 350, 200};
 #define PHASE_SEQUENCE_LEN (sizeof(PHASE_SEQUENCE) / sizeof(PHASE_SEQUENCE[0]))
 uint8_t phase_index = 0;
 uint16_t PHASE_MAX = 255;
 
 uint16_t tick_counter = 0;
-#define SWITCH_INTERVAL_MS (2400000) // 4 minutes
+#define SWITCH_INTERVAL_MS (1200000) // 4 minutes
 #define TICKS_PER_SWITCH (SWITCH_INTERVAL_MS / TICK_DELAY_MS)
 
 // ===== FUNCTION PROTOTYPES =====
@@ -322,6 +322,35 @@ void set_fade_color(uint16_t phase, uint32_t diff) {
     strip.show();
 }
 
+void chaotic_spiral_disrupt(uint8_t steps, uint16_t step_delay_ms) {
+    uint16_t base_delay = 100;  // start around 5kHz
+    uint16_t max_delay = 20;    // end around 25kHz
+
+    for (uint8_t i = 0; i <= steps; i++) {
+        // Interpolate up in pitch (down in delay)
+        uint16_t pitch_delay = base_delay - ((base_delay - max_delay) * i / steps);
+        pitch_delay += random(-10, 10);  // add chaos jitter
+
+        if (pitch_delay < 10) pitch_delay = 10;
+
+        // Random number of buzz pulses per step (like "shards" of sound)
+        uint8_t bursts = random(3, 7);
+
+        for (uint8_t b = 0; b < bursts; b++) {
+            PORTB |= (1 << BUZZER);
+            delay_us_custom(pitch_delay);
+            PORTB &= ~(1 << BUZZER);
+            delay_us_custom(pitch_delay + random(10, 60));
+        }
+
+        // Growing silence = fade-out effect
+        _delay_ms(step_delay_ms + i / 4);
+    }
+}
+
+
+
+
 /**
  * Main program loop
  * Implements Kuramoto-style phase synchronization
@@ -355,7 +384,7 @@ int main(void) {
 
         // Fade from red to frozen target color
         const uint8_t steps = 100;
-        const uint16_t delay_ms = 20;
+        const uint16_t delay_ms = 10;
 
         for (uint8_t i = 0; i <= steps; i++) {
             uint16_t blend = ((uint16_t)i * 255) / steps;
@@ -367,10 +396,9 @@ int main(void) {
 
             strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
             strip.show();
-            _delay_ms(delay_ms);
+            chaotic_spiral_disrupt(1, delay_ms);
         }
 
-        // ✅ Clean reset
         strip.setPixelColor(0, strip.Color(target_g, target_r, target_b));
         strip.show();
 
