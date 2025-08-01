@@ -46,19 +46,19 @@
 #define REFRACTORY_FLASH        20
 #define REFRACTORY_TRIGGER      10
 
-const uint8_t GRADIENT_START_R[4] = {100, 255,   0, 200};
-const uint8_t GRADIENT_START_G[4] = {255, 255, 0, 210};
-const uint8_t GRADIENT_START_B[4] = {100,   0,   255,   0};
+const uint8_t GRADIENT_START_R[4] = {255, 255,   0, 200};
+const uint8_t GRADIENT_START_G[4] = {135, 255, 0, 210};
+const uint8_t GRADIENT_START_B[4] = {0,   0,   255,   0};
 
-const uint8_t GRADIENT_END_R[4] = {255, 255,   0, 255};
-const uint8_t GRADIENT_END_G[4] = {183,   0,   255, 110};
+const uint8_t GRADIENT_END_R[4] = {0, 255,   0, 255};
+const uint8_t GRADIENT_END_G[4] = {0,   0,   255, 110};
 const uint8_t GRADIENT_END_B[4] = {  0, 255, 0,   0};
 
 // ===== GLOBAL VARIABLES =====
 Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // ===== Dynamic Phase Configuration =====
-const uint16_t PHASE_SEQUENCE[] = {255, 450, 210, 350};
+const uint16_t PHASE_SEQUENCE[] = {450, 450, 210, 350};
 #define PHASE_SEQUENCE_LEN (sizeof(PHASE_SEQUENCE) / sizeof(PHASE_SEQUENCE[0]))
 uint8_t phase_index = 0;
 uint16_t PHASE_MAX = 255;
@@ -402,13 +402,13 @@ int main(void) {
         set_fade_color(phase, (time - red_timer));
 
         tick_counter++;
-        if (tick_counter >= TICKS_PER_SWITCH) {
-            tick_counter = 0;
-            phase_index = (phase_index + 1) % PHASE_SEQUENCE_LEN;
-            PHASE_MAX = PHASE_SEQUENCE[phase_index];
-            phase = 0;
-            half_chirped = false;
-        }
+        // if (tick_counter >= TICKS_PER_SWITCH) {
+        //     tick_counter = 0;
+        //     phase_index = (phase_index + 1) % PHASE_SEQUENCE_LEN;
+        //     PHASE_MAX = PHASE_SEQUENCE[phase_index];
+        //     phase = 0;
+        //     half_chirped = false;
+        // }
 
         // Advance phase
         phase += PHASE_STEP;
