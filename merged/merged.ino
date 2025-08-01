@@ -64,7 +64,7 @@ uint8_t phase_index = 0;
 uint16_t PHASE_MAX = 255;
 
 uint16_t tick_counter = 0;
-#define SWITCH_INTERVAL_MS (240000) // 4 minutes
+#define SWITCH_INTERVAL_MS (2400000) // 4 minutes
 #define TICKS_PER_SWITCH (SWITCH_INTERVAL_MS / TICK_DELAY_MS)
 
 // ===== FUNCTION PROTOTYPES =====
@@ -73,7 +73,7 @@ void emit_ir_pulse(uint16_t cycles);
 void delay_us_custom(uint16_t us);
 void chirp(void);
 void half_chirp(void);
-void set_fade_color(uint16_t phase);
+void set_fade_color(uint16_t phase, uint32_t diff);
 
 // codes
 bool code_received = false;
@@ -293,16 +293,30 @@ void half_chirp() {
     }
 }
 
-void set_fade_color(uint16_t phase) {
+void set_fade_color(uint16_t phase, uint32_t diff) {
     uint8_t r = SANGUINE_START_R + ((uint16_t)(SANGUINE_END_R - SANGUINE_START_R) * phase) / PHASE_MAX;
     uint8_t g = SANGUINE_START_G + ((uint16_t)(SANGUINE_END_G - SANGUINE_START_G) * phase) / PHASE_MAX;
     uint8_t b = SANGUINE_START_B + ((uint16_t)(SANGUINE_END_B - SANGUINE_START_B) * phase) / PHASE_MAX;
 
-    if (red) {
-      r = 255;
-      g = 0;
-      b = 0;
-    }
+    // if (red) {
+    //   // r = 255;// * (1-(diff/1000000));
+    //   // g = 0;
+    //   // b = 0;
+
+    //   if (diff < 10000000UL) {
+    //     // fade_factor goes from 1.0 (just turned red) to 0.0 (fully faded)
+    //     float fade_factor = 1.0 - ((float)diff / 10000000.0);
+    //     if (fade_factor < 0) fade_factor = 0;
+    //     if (fade_factor > 1) fade_factor = 1;
+
+    //     // Blend red with current color based on fade factor
+    //     r = (uint8_t)(r * (1.0 - fade_factor) + 255 * fade_factor);
+    //     g = (uint8_t)(g * (1.0 - fade_factor));
+    //     b = (uint8_t)(b * (1.0 - fade_factor));
+    //   }
+    // }
+
+    // if (r > 255) r = 255;
     
     strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
     strip.show();
@@ -324,27 +338,56 @@ int main(void) {
       // _delay_ms(TICK_DELAY_MS);
       uint32_t time = my_micros();
 
-      // if (red_timer != 0 && time - red_timer < 10000) {
+      // if (red_timer != 0 && time - red_timer < 10000000) {
       //   red = true;
       // } else {
       //   red = false;
+      //   red_timer = 0;
       //   code_num = 0;
       // }
       read_code();
 
       if (code_num == 5) {
-        red_timer = my_micros();
-        strip.setPixelColor(0, strip.Color(0, 255, 0));  // GRB order
+       // Freeze phase color at the moment of reception
+        uint8_t target_r = SANGUINE_START_R + ((uint16_t)(SANGUINE_END_R - SANGUINE_START_R) * phase) / PHASE_MAX;
+        uint8_t target_g = SANGUINE_START_G + ((uint16_t)(SANGUINE_END_G - SANGUINE_START_G) * phase) / PHASE_MAX;
+        uint8_t target_b = SANGUINE_START_B + ((uint16_t)(SANGUINE_END_B - SANGUINE_START_B) * phase) / PHASE_MAX;
+
+        // Fade from red to frozen target color
+        const uint8_t steps = 100;
+        const uint16_t delay_ms = 20;
+
+        for (uint8_t i = 0; i <= steps; i++) {
+            uint16_t blend = ((uint16_t)i * 255) / steps;
+            uint16_t inv_blend = 255 - blend;
+
+            uint8_t r = (uint8_t)((255 * inv_blend + target_r * blend) / 255);
+            uint8_t g = (uint8_t)((0   * inv_blend + target_g * blend) / 255);
+            uint8_t b = (uint8_t)((0   * inv_blend + target_b * blend) / 255);
+
+            strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
+            strip.show();
+            _delay_ms(delay_ms);
+        }
+
+        // ✅ Clean reset
+        strip.setPixelColor(0, strip.Color(target_g, target_r, target_b));
         strip.show();
-        _delay_ms(100);
+
         code_num = 0;
+        code_received = false;
+        red = false;
+        red_timer = 0;
+
+        // Delay random phase jump *after* color is stable
         phase += random(0, 255);
       }
+
 
       if (time - timer > 2000) {
         timer = time;
           
-        set_fade_color(phase);
+        set_fade_color(phase, (time - red_timer));
 
         tick_counter++;
         if (tick_counter >= TICKS_PER_SWITCH) {
