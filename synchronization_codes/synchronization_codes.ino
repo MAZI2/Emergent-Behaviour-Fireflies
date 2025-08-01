@@ -50,8 +50,6 @@ uint32_t decoding_start_time;
 uint8_t code[8];
 uint8_t code_num;
 
-#define IR_DECODE_ERROR 0xFE
-
 void setup_timer1_for_micros() {
   TCCR1 = (1 << CS11); // Clock prescaler = 8 → 1 tick = 1µs at 8MHz
 
@@ -59,9 +57,9 @@ void setup_timer1_for_micros() {
   TIMSK |= (1 << TOIE1); // Enable overflow interrupt
 }
 volatile int32_t timer1_overflows = 0;
-ISR(TIMER1_OVF_vect) {
-  timer1_overflows++;
-}
+// ISR(TIMER1_OVF_vect) {
+//   timer1_overflows++;
+// }
 
 uint32_t my_micros() {
   uint8_t t;
@@ -83,18 +81,25 @@ uint32_t my_micros() {
 
 void setup() {
   // IR pins
-  DDRB |= (1 << IR_TX);     // IR emitter output
-  DDRB &= ~(1 << IR_RX);    // IR receiver input
-  PORTB |= (1 << IR_RX);    // Pull-up on receiver
-  DDRB |= (1 << LED);       // LED output
-  DDRB |= (1 << BUZZER);    // Buzzer output
-  PORTB &= ~(1 << LED);     // LED off
-  PORTB &= ~(1 << BUZZER);  // Buzzer off
+  DDRB |= (1 << IR_TX);      // IR emitter as output
+  DDRB &= ~(1 << IR_RX);     // IR receiver as input
+  PORTB |= (1 << IR_RX);     // Enable pull-up on receiver
+  
+  // Configure LED and buzzer
+  DDRB |= (1 << LED);        // LED as output
+  DDRB |= (1 << BUZZER);     // Buzzer as output
+  PORTB &= ~(1 << LED);      // LED off initially
+  PORTB &= ~(1 << BUZZER);   // Buzzer off initially
+  
+  // Initialize timer for jitter (currently unused but ready)
+  TCCR0B = (1 << CS01);      // Timer0 prescaler /8
+  
+  // Initialize NeoPixel
+  strip.begin();
+  strip.clear();
+  strip.show();
 
-  DDRB |= (1 << PB4);
-  TCCR0B = (1 << CS01);
-
-  setup_timer1_for_micros();
+  // setup_timer1_for_micros();
 }
 
 void emit_pulse(uint16_t cycles) {
@@ -150,106 +155,42 @@ void construct_code() {
 
 
 void read_code() {
-  // 2.25ms from decoding to end. Start 1.2ms(if > 1.15)
-  // if (start_intro) {
-  //   PORTB |= (1 << PB4);
-  // } else {
-  //   PORTB &= ~(1 << PB4);
-  // }
-  // if (decoding) {
-  //   PORTB |= (1 << PB4);
-  // } else {
-  //   PORTB &= ~(1 << PB4);
-  // }
-
-  // uint32_t test = my_micros();
-
-  // if (test % 300 == 299) {
-  //   PORTB &= ~(1 << PB4);
-    
-  // } else {
-  //   PORTB |= (1 << PB4);
-  // }
-
   bool is_high = false;
-  // PORTB &= ~(1 << PB4);
 
   if ((PINB & (1 << IR_RX)) == 0) {
-    // PORTB |= (1 << PB4);
     is_high = true;
   } else {
-    // PORTB &= ~(1 << PB4);
     is_high = false;
   }
 
   if (state == 0) {
-    // PORTB |= (1 << PB4);
-    PORTB &= ~(1 << PB4);
     if (is_high) {
-      // PORTB |= (1 << PB4);
       start_time = my_micros();
       
       state = 1;
       code_received = false;
-
-      // PORTB &= ~(1 << PB4);
     }
 
   } else if (state == 1) {
-    // PORTB |= (1 << PB4);
-    PORTB &= ~(1 << PB4);
     if (is_high) {
-      // PORTB &= ~(1 << PB4);
       duration = my_micros();
       if (duration - start_time > 2750) {
-        PORTB &= ~(1 << PB4);
         decoding_start_time = my_micros() + 1600;
         state = 2;
-        // PORTB &= ~(1 << PB4);
-      } else {
-        // PORTB &= ~(1 << PB4);
       }
     } else {
       state = 0;
     }
 
   } else if (state == 2) {
-    // PORTB |= (1 << PB4);
-    PORTB &= ~(1 << PB4);
     int32_t delta = my_micros() - decoding_start_time; // ensure 32-bit
     int8_t slot = (delta * 8) / 14500; // maps [0,2249] -> [0,7]
     
     if (slot > 7) slot = 7;
-    // if (slot == 1) {
-    //   // PORTB &= ~(1 << PB4);
-    //   PORTB |= (1 << PB4);
-    // } else {
-    //   // PORTB |= (1 << PB4);
-    //   PORTB &= ~(1 << PB4);
-    // }
 
-    if (slot > 0) {
-      code[slot] = is_high;
-      // if (is_high) {
-      //   PORTB |= (1 << PB4);
-      // } else {
-      //   PORTB &= ~(1 << PB4);
-      // }
-      // if (is_high) {
-      //   PORTB &= ~(1 << PB4);
-      // }
-      // } else {
-      //   PORTB |= (1 << PB4);
-      // }
-    }
-    // if (slot == 5) {
-    //   PORTB &= ~(1 << PB4);
-    // } else {
-    //   PORTB |= (1 << PB4);
-    // }
+    if (slot > 0) code[slot] = is_high;
+
     if (slot >= 7) {
-      PORTB &= ~(1 << PB4);
-      // PORTB |= (1 << PB4);
       construct_code();
       code_received = true;
       state = 0;
@@ -283,11 +224,26 @@ void beep(uint8_t tone) {
   }
 }
 
+void flash_led_rgb() {
+  uint8_t r = rand() % 256;
+  uint8_t g = rand() % 256;
+  uint8_t b = rand() % 256;
+
+  strip.setPixelColor(0, strip.Color(r, g, b));
+  strip.show();
+
+  _delay_ms(100);
+
+  strip.setPixelColor(0, strip.Color(0, 0, 0));
+  strip.show();
+}
+
+
 
 int main(void) {
-  cli(); 
+  // cli(); 
   setup();
-  sei();
+  // sei();
 
   uint8_t phase = 0;
   uint8_t last_rx_state = (PINB & (1 << IR_RX));
@@ -295,56 +251,66 @@ int main(void) {
   uint8_t jitter_tick = 0;
 
   while (1) {
-    // _delay_ms(TICK_DELAY_MS);
+    _delay_ms(TICK_DELAY_MS);
     // phase += PHASE_STEP;
 
-    uint32_t time = my_micros();
+    // uint32_t time = my_micros();
 
-    if (time - red_timer < 10000) {
-      red = true;
-    } else {
-      red = false;
-      code_num = 0;
+    // if (time - red_timer < 10000) {
+    //   red = true;
+    // } else {
+    //   red = false;
+    //   code_num = 0;
+    // }
+
+    // read_code();
+
+    // if (code_num == 5) {
+    //   red_timer = my_micros();
+    //   phase += random(0, 255);
+    // }
+
+    // if (time - timer > 2000) {
+    //   timer = time;
+
+    phase += PHASE_STEP;
+  
+    if (phase > PHASE_MAX) phase = PHASE_MAX;
+
+    if (phase >= PHASE_MAX) {
+      emit_pulse(200);
+      // send_code(175);
+      flash_led_rgb();
+      beep(phase);
+
+      phase = 0;
+      refractory = 170;
     }
-
-    read_code();
-
-    if (code_num == 5) {
-      red_timer = my_micros();
-      phase += random(0, 255);
-    }
-
-
-    if (time - timer > 2000) {
-      timer = time;
-
-      phase += PHASE_STEP;
     
-      if (phase > PHASE_MAX) phase = PHASE_MAX;
+    // phase_rgb_sanguine(phase);
+    
+    
+    uint8_t current_rx = (PINB & (1 << IR_RX));
+    if (last_rx_state && !current_rx && refractory == 0) {
+      if (phase > (PHASE_MAX / 4)) {
+        uint8_t delta = ((uint16_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
+        phase += delta;
+        if (phase > PHASE_MAX) phase = PHASE_MAX;
 
-      if (phase >= PHASE_MAX) {
-        emit_pulse(200);
-        // send_code(175);
-        beep(phase);
-
-        phase = 0;
-        refractory = 170;
-      }
-      
-      phase_rgb_sanguine(phase);
-      
-      
-      uint8_t current_rx = (PINB & (1 << IR_RX));
-      if (last_rx_state && !current_rx && refractory == 0) {
-        if (phase > (PHASE_MAX / 4)) {
-          uint8_t delta = ((uint16_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
-          phase += delta;
-          if (phase > PHASE_MAX) phase = PHASE_MAX;
+        // Check if close enough to flash immediately
+        if (PHASE_MAX - phase < JUMP_TO_FLASH_MARGIN) {
+          emit_pulse(200);
+          flash_led_rgb();
+          phase = 0;
+          refractory = 20;
+        } else {
+          refractory = 10;
         }
       }
-
-      if (refractory > 0) refractory--;
-      last_rx_state = current_rx;
     }
+
+    if (refractory > 0) refractory--;
+    last_rx_state = current_rx;
+    // }
   }
 }
