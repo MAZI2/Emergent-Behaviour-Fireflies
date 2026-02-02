@@ -9,14 +9,13 @@
  * Based on the Kuramoto model for oscillator synchronization
  */
 
-#define F_CPU 8000000UL
-
+#include <Arduino.h>
 #include <avr/io.h>
-#include <util/delay.h>
 #include <stdint.h>
-#include <avr/interrupt.h>
 #include <stdlib.h>
 #include <Adafruit_NeoPixel.h>
+#include <avr/interrupt.h>
+
 
 // ===== HARDWARE CONFIGURATION =====
 #define NEOPIXEL_PIN    PB2
@@ -45,6 +44,39 @@
 #define IR_PULSE_HALF_PERIOD    15
 #define REFRACTORY_FLASH        20
 #define REFRACTORY_TRIGGER      10
+
+// --- pulse queue ---
+#define PULSE_Q_SIZE 16
+volatile uint16_t pulse_q[PULSE_Q_SIZE];
+volatile uint8_t q_head = 0;
+volatile uint8_t q_tail = 0;
+
+volatile uint32_t last_edge_us = 0;
+volatile uint8_t last_level = 1;   // TSOP idle HIGH
+
+
+ISR(PCINT0_vect) {
+    uint8_t level = (PINB & (1 << IR_RX)) ? 1 : 0;
+    uint32_t now = micros();
+
+    if (level != last_level) {
+
+        // rising edge = LOW pulse ended
+        if (last_level == 0 && level == 1) {
+            uint16_t w = (uint16_t)(now - last_edge_us);
+
+            uint8_t next = (q_head + 1) & (PULSE_Q_SIZE - 1);
+            if (next != q_tail) {         // drop if full
+                pulse_q[q_head] = w;
+                q_head = next;
+            }
+        }
+
+        last_edge_us = now;
+        last_level = level;
+    }
+}
+
 
 const uint8_t GRADIENT_START_R[4] = {255, 255,   0, 200};
 const uint8_t GRADIENT_START_G[4] = {135, 255, 0, 210};
@@ -89,35 +121,6 @@ uint32_t decoding_start_time;
 uint8_t code[8];
 uint8_t code_num;
 
-void setup_timer1_for_micros() {
-  TCCR1 = (1 << CS11); // Clock prescaler = 8 → 1 tick = 1µs at 8MHz
-
-  TCNT1 = 0;            // Reset counter
-  TIMSK |= (1 << TOIE1); // Enable overflow interrupt
-}
-volatile int32_t timer1_overflows = 0;
-ISR(TIMER1_OVF_vect) {
-  timer1_overflows++;
-}
-
-uint32_t my_micros() {
-  uint8_t t;
-  uint32_t o;
-
-  cli(); // atomic read
-  t = TCNT1;
-  o = timer1_overflows;
-  if ((TIFR & (1 << TOV1)) && (t < 255)) {
-    // An overflow happened right after we read
-    o++;
-  }
-  sei();
-
-  int32_t raw_ticks = ((o << 8) | t);
-  return (raw_ticks * 1000L) / 3850;
-}
-/////////
-
 /**
  * Initialize hardware peripherals
  */
@@ -132,16 +135,16 @@ void setup_hardware(void) {
     DDRB |= (1 << BUZZER);     // Buzzer as output
     PORTB &= ~(1 << LED);      // LED off initially
     PORTB &= ~(1 << BUZZER);   // Buzzer off initially
-    
-    // Initialize timer for jitter (currently unused but ready)
-    TCCR0B = (1 << CS01);      // Timer0 prescaler /8
+
+    GIMSK |= (1 << PCIE);
+    PCMSK |= (1 << PCINT0);
+
+    sei();
     
     // Initialize NeoPixel
     strip.begin();
     strip.clear();
     strip.show();
-
-    setup_timer1_for_micros();
 }
 
 /**
@@ -151,16 +154,16 @@ void setup_hardware(void) {
 void emit_ir_pulse(uint16_t cycles) {
     for (uint16_t i = 0; i < cycles; i++) {
         PORTB |= (1 << IR_TX);
-        _delay_us(IR_PULSE_HALF_PERIOD);
+        delayMicroseconds(IR_PULSE_HALF_PERIOD);
         PORTB &= ~(1 << IR_TX);
-        _delay_us(IR_PULSE_HALF_PERIOD);
+        delayMicroseconds(IR_PULSE_HALF_PERIOD);
     }
 }
 
 void send_code(uint8_t code) {
   emit_ir_pulse(100);  // longer pulse for start (40 cycles * 30us = ~1.2ms)
 
-  //_delay_us(600);  // Short gap after start pulse
+  //delayMicroseconds(600);  // Short gap after start pulse
 
   // Send bits, MSB first
   for (int8_t i = 7; i >= 0; i--) {
@@ -169,7 +172,7 @@ void send_code(uint8_t code) {
       emit_ir_pulse(60); // 1 cycle = 30us total (15us on + 15us off)
     } else {
       // Send '0' bit: no pulse, just delay 30us (one cycle length)
-      _delay_us(1800);
+      delayMicroseconds(1800);
     }
   }
 
@@ -181,11 +184,11 @@ void print_code() {
       // Send '1' bit: pulse for 15us ON, 15us OFF
       // emit_ir_pulse(60); // 1 cycle = 30us total (15us on + 15us off)
       PORTB |= (1 << PB4);
-      _delay_us(300);
+      delayMicroseconds(300);
     } else {
       // Send '0' bit: no pulse, just delay 30us (one cycle length)
       PORTB &= ~(1 << PB4);
-      _delay_us(300);
+      delayMicroseconds(300);
     }
   }
 } 
@@ -198,51 +201,121 @@ void construct_code() {
   print_code();
 }
 
+static inline bool pulse_pop(uint16_t &w) {
+    if (q_tail == q_head) return false;
+    w = pulse_q[q_tail];
+    q_tail = (q_tail + 1) & (PULSE_Q_SIZE - 1);
+    return true;
+}
+
+bool decode_frame(uint8_t &out) {
+
+    static bool in_frame = false;
+    static uint8_t bit_count = 0;
+    static uint8_t value = 0;
+    static uint32_t last_activity = 0;
+
+    uint16_t w;
+    while (pulse_pop(w)) {
+
+        last_activity = micros();
+
+        // -------- START DETECT --------
+        if (!in_frame) {
+            // your transmitter start is ~6000us, so accept that
+            if (w > 4500 && w < 9000) {
+                in_frame = true;
+                bit_count = 0;
+                value = 0;
+            }
+            continue;
+        }
+
+        // -------- BIT DECODE --------
+        // reject garbage widths (TSOP glitches / collisions)
+        if (w < 300 || w > 3500) {
+            in_frame = false;
+            continue;
+        }
+
+        value <<= 1;
+
+        // Option A expected:
+        // 0-bit ~1000us, 1-bit ~2000us (tune threshold if needed)
+        if (w > 1500) value |= 1;
+
+        bit_count++;
+
+        if (bit_count >= 8) {
+            out = value;
+            in_frame = false;
+            return true;
+        }
+    }
+
+    // -------- TIMEOUT --------
+    if (in_frame && (micros() - last_activity > 60000UL)) { // 60ms slack
+        in_frame = false;
+    }
+
+    return false;
+}
+
+
+
+
 
 
 void read_code() {
-  bool is_high = false;
+  static uint8_t last = 1;   // TSOP idle HIGH
+  static uint32_t t_edge = 0;
+  static uint8_t bit_index = 0;
+  static bool in_frame = false;
 
-  if ((PINB & (1 << IR_RX)) == 0) {
-    is_high = true;
-  } else {
-    is_high = false;
+  uint8_t now = (PINB & (1 << IR_RX)) ? 1 : 0;
+
+  if (now != last) {
+    uint32_t t = micros();
+    uint32_t dt = t - t_edge;
+    t_edge = t;
+
+    // Rising edge = end of LOW pulse
+    if (last == 0 && now == 1) {
+      uint32_t low_duration = dt;
+
+      if (!in_frame) {
+        // Detect start burst (~3000us+)
+        if (low_duration > 2500) {
+          in_frame = true;
+          bit_index = 0;
+          code_num = 0;
+        }
+      } else {
+        // Decode bit based on LOW width
+        code_num <<= 1;
+
+        if (low_duration > 1200) {
+          code_num |= 1;   // '1' bit
+        }
+
+        bit_index++;
+
+        if (bit_index >= 8) {
+          code_received = true;
+          in_frame = false;
+        }
+      }
+    }
+
+    last = now;
   }
 
-  if (state == 0) {
-    if (is_high) {
-      start_time = my_micros();
-      
-      state = 1;
-      code_received = false;
-    }
-
-  } else if (state == 1) {
-    if (is_high) {
-      duration = my_micros();
-      if (duration - start_time > 2750) {
-        decoding_start_time = my_micros() + 1600;
-        state = 2;
-      }
-    } else {
-      state = 0;
-    }
-
-  } else if (state == 2) {
-    int32_t delta = my_micros() - decoding_start_time; // ensure 32-bit
-    int8_t slot = (delta * 8) / 14500; // maps [0,2249] -> [0,7]
-    
-    if (slot > 7) slot = 7;
-
-    if (slot > 0) code[slot] = is_high;
-
-    if (slot >= 7) {
-      construct_code();
-      code_received = true;
-      state = 0;
-    }
+  // Timeout reset
+  if (in_frame && (micros() - t_edge > 10000)) {
+    in_frame = false;
   }
 }
+
 
 /**
  * Custom microsecond delay function for audio generation
@@ -274,7 +347,7 @@ void chirp(void) {
         if (delay_val < CHIRP_MIN_DELAY) {
             delay_val = CHIRP_MIN_DELAY;
         }
-        _delay_ms(CHIRP_PAUSE_MS);
+        delay(CHIRP_PAUSE_MS);
     }
 }
 
@@ -325,7 +398,7 @@ void chaotic_spiral_disrupt(uint8_t steps, uint16_t step_delay_ms) {
         }
 
         // Growing silence = fade-out effect
-        _delay_ms(step_delay_ms + i / 4);
+        delay(step_delay_ms + i / 4);
     }
 }
 
@@ -337,6 +410,8 @@ void chaotic_spiral_disrupt(uint8_t steps, uint16_t step_delay_ms) {
  * Implements Kuramoto-style phase synchronization
  */
 int main(void) {
+    init();   // sets up Timer0 etc
+    sei();    // enable interrupts
     setup_hardware();
     
     uint16_t phase = 0;
@@ -346,7 +421,7 @@ int main(void) {
 
     while (1) {
       // _delay_ms(TICK_DELAY_MS);
-      uint32_t time = my_micros();
+      uint32_t time = micros();
 
       // if (red_timer != 0 && time - red_timer < 10000000) {
       //   red = true;
@@ -355,46 +430,54 @@ int main(void) {
       //   red_timer = 0;
       //   code_num = 0;
       // }
-      read_code();
+      uint8_t rx;
+      if (decode_frame(rx)) {
+        if (rx == 170) {
+          strip.setPixelColor(0, strip.Color(255, 0, 0)); // red flash on ANY decoded byte
+          strip.show();
+          delay(50);
+          strip.clear();
+          strip.show();
 
-      if (code_num == 5) {
-       // Freeze phase color at the moment of reception
-        uint8_t i = phase_index;  // use current gradient set
+          // trigger behavior
 
-        uint8_t target_r = GRADIENT_START_R[i] + ((uint16_t)(GRADIENT_END_R[i] - GRADIENT_START_R[i]) * phase) / PHASE_MAX;
-        uint8_t target_g = GRADIENT_START_G[i] + ((uint16_t)(GRADIENT_END_G[i] - GRADIENT_START_G[i]) * phase) / PHASE_MAX;
-        uint8_t target_b = GRADIENT_START_B[i] + ((uint16_t)(GRADIENT_END_B[i] - GRADIENT_START_B[i]) * phase) / PHASE_MAX;
+        // Freeze phase color at the moment of reception
+          uint8_t i = phase_index;  // use current gradient set
+
+          uint8_t target_r = GRADIENT_START_R[i] + ((uint16_t)(GRADIENT_END_R[i] - GRADIENT_START_R[i]) * phase) / PHASE_MAX;
+          uint8_t target_g = GRADIENT_START_G[i] + ((uint16_t)(GRADIENT_END_G[i] - GRADIENT_START_G[i]) * phase) / PHASE_MAX;
+          uint8_t target_b = GRADIENT_START_B[i] + ((uint16_t)(GRADIENT_END_B[i] - GRADIENT_START_B[i]) * phase) / PHASE_MAX;
 
 
-        // Fade from red to frozen target color
-        const uint8_t steps = 100;
-        const uint16_t delay_ms = 10;
+          // Fade from red to frozen target color
+          const uint8_t steps = 100;
+          const uint16_t delay_ms = 10;
 
-        for (uint8_t i = 0; i <= steps; i++) {
-            uint16_t blend = ((uint16_t)i * 255) / steps;
-            uint16_t inv_blend = 255 - blend;
+          for (uint8_t i = 0; i <= steps; i++) {
+              uint16_t blend = ((uint16_t)i * 255) / steps;
+              uint16_t inv_blend = 255 - blend;
 
-            uint8_t r = (uint8_t)((255 * inv_blend + target_r * blend) / 255);
-            uint8_t g = (uint8_t)((0   * inv_blend + target_g * blend) / 255);
-            uint8_t b = (uint8_t)((0   * inv_blend + target_b * blend) / 255);
+              uint8_t r = (uint8_t)((255 * inv_blend + target_r * blend) / 255);
+              uint8_t g = (uint8_t)((0   * inv_blend + target_g * blend) / 255);
+              uint8_t b = (uint8_t)((0   * inv_blend + target_b * blend) / 255);
 
-            strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
-            strip.show();
-            chaotic_spiral_disrupt(1, delay_ms);
+              strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
+              strip.show();
+              chaotic_spiral_disrupt(1, delay_ms);
+          }
+
+          strip.setPixelColor(0, strip.Color(target_g, target_r, target_b));
+          strip.show();
+
+          code_num = 0;
+          code_received = false;
+          red = false;
+          red_timer = 0;
+
+          // Delay random phase jump *after* color is stable
+          phase += random(0, 255);
         }
-
-        strip.setPixelColor(0, strip.Color(target_g, target_r, target_b));
-        strip.show();
-
-        code_num = 0;
-        code_received = false;
-        red = false;
-        red_timer = 0;
-
-        // Delay random phase jump *after* color is stable
-        phase += random(0, 255);
       }
-
 
       if (time - timer > 2000) {
         timer = time;

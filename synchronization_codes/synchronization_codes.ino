@@ -1,11 +1,6 @@
-#define F_CPU 8000000UL
-
+#include <Arduino.h>
 #include <avr/io.h>
-#include <util/delay.h>
 #include <stdint.h>
-#include <avr/interrupt.h>
-
-// Include all libraries first
 #include <Adafruit_NeoPixel.h>
 
 #define NEOPIXEL_PIN  PB2
@@ -50,34 +45,6 @@ uint32_t decoding_start_time;
 uint8_t code[8];
 uint8_t code_num;
 
-void setup_timer1_for_micros() {
-  TCCR1 = (1 << CS11); // Clock prescaler = 8 → 1 tick = 1µs at 8MHz
-
-  TCNT1 = 0;            // Reset counter
-  TIMSK |= (1 << TOIE1); // Enable overflow interrupt
-}
-volatile int32_t timer1_overflows = 0;
-ISR(TIMER1_OVF_vect) {
-  timer1_overflows++;
-}
-
-uint32_t my_micros() {
-  uint8_t t;
-  uint32_t o;
-
-  cli(); // atomic read
-  t = TCNT1;
-  o = timer1_overflows;
-  if ((TIFR & (1 << TOV1)) && (t < 255)) {
-    // An overflow happened right after we read
-    o++;
-  }
-  sei();
-
-  int32_t raw_ticks = ((o << 8) | t);
-  return (raw_ticks * 1000L) / 3850;
-}
-
 
 void setup() {
   // IR pins
@@ -91,42 +58,53 @@ void setup() {
   PORTB &= ~(1 << LED);      // LED off initially
   PORTB &= ~(1 << BUZZER);   // Buzzer off initially
   
-  // Initialize timer for jitter (currently unused but ready)
-  TCCR0B = (1 << CS01);      // Timer0 prescaler /8
-  
   // Initialize NeoPixel
   strip.begin();
   strip.clear();
   strip.show();
-
-  setup_timer1_for_micros();
 }
 
 void emit_pulse(uint16_t cycles) {
   for (uint16_t i = 0; i < cycles; i++) {
     PORTB |= (1 << IR_TX);
-    _delay_us(15);
+    delayMicroseconds(15);
     PORTB &= ~(1 << IR_TX);
-    _delay_us(15);
+    delayMicroseconds(15);
   }
 }
 
-void send_code(uint8_t code) {
-  emit_pulse(100);  // longer pulse for start (40 cycles * 30us = ~1.2ms)
+static inline void mark_us(uint16_t us) {
+  // carrier ON for us microseconds
+  // reuse your emit_pulse: 1 cycle = 30us (15+15)
+  uint16_t cycles = us / 30;
+  if (cycles < 1) cycles = 1;
+  emit_pulse(cycles);
+}
 
-  //_delay_us(600);  // Short gap after start pulse
+static inline void space_us(uint16_t us) {
+  // carrier OFF for us microseconds
+  PORTB &= ~(1 << IR_TX);
+  delayMicroseconds(us);
+}
 
-  // Send bits, MSB first
+void send_code(uint8_t v) {
+  // Start
+  mark_us(6000);
+  space_us(3000);
+
+  // 8 bits MSB first
   for (int8_t i = 7; i >= 0; i--) {
-    if (code & (1 << i)) {
-      // Send '1' bit: pulse for 15us ON, 15us OFF
-      emit_pulse(60); // 1 cycle = 30us total (15us on + 15us off)
+    if (v & (1 << i)) {
+      mark_us(2000);  // '1'
+      space_us(2000);
     } else {
-      // Send '0' bit: no pulse, just delay 30us (one cycle length)
-      _delay_us(1800);
+      mark_us(1000);  // '0'
+      space_us(3000);
     }
   }
 
+  // End gap (helps receiver reset between packets)
+  space_us(6000);
 }
 
 void print_code() {
@@ -135,11 +113,11 @@ void print_code() {
       // Send '1' bit: pulse for 15us ON, 15us OFF
       // emit_pulse(60); // 1 cycle = 30us total (15us on + 15us off)
       PORTB |= (1 << PB4);
-      _delay_us(300);
+      delayMicroseconds(300);
     } else {
       // Send '0' bit: no pulse, just delay 30us (one cycle length)
       PORTB &= ~(1 << PB4);
-      _delay_us(300);
+      delayMicroseconds(300);
     }
   }
 } 
@@ -165,7 +143,7 @@ void read_code() {
 
   if (state == 0) {
     if (is_high) {
-      start_time = my_micros();
+      start_time = micros();
       
       state = 1;
       code_received = false;
@@ -173,9 +151,9 @@ void read_code() {
 
   } else if (state == 1) {
     if (is_high) {
-      duration = my_micros();
+      duration = micros();
       if (duration - start_time > 2750) {
-        decoding_start_time = my_micros() + 1600;
+        decoding_start_time = micros() + 1600;
         state = 2;
       }
     } else {
@@ -183,7 +161,7 @@ void read_code() {
     }
 
   } else if (state == 2) {
-    int32_t delta = my_micros() - decoding_start_time; // ensure 32-bit
+    int32_t delta = micros() - decoding_start_time; // ensure 32-bit
     int8_t slot = (delta * 8) / 14500; // maps [0,2249] -> [0,7]
     
     if (slot > 7) slot = 7;
@@ -218,9 +196,9 @@ void beep(uint8_t tone) {
   // Buzzer tone generation for ~100ms
   for (i = 0; i < 100; i++) {
     PORTB |= (1 << BUZZER);
-    _delay_us(tone);
+    delayMicroseconds(tone);
     PORTB &= ~(1 << BUZZER);
-    _delay_us(tone);
+    delayMicroseconds(tone);
   }
 }
 
@@ -232,7 +210,7 @@ void flash_led_rgb() {
   strip.setPixelColor(0, strip.Color(g, r, b));
   strip.show();
 
-  // _delay_ms(100);
+  // delay(100);
 
   // strip.setPixelColor(0, strip.Color(0, 0, 0));
   // strip.show();
@@ -241,6 +219,8 @@ void flash_led_rgb() {
 
 
 int main(void) {
+  init();   // sets up Timer0 etc
+  sei();    // enable interrupts
   // cli(); 
   setup();
   // sei();
@@ -251,10 +231,10 @@ int main(void) {
   uint8_t jitter_tick = 0;
 
   while (1) {
-    _delay_ms(TICK_DELAY_MS);
+    delay(TICK_DELAY_MS);
     // phase += PHASE_STEP;
 
-    // uint32_t time = my_micros();
+    // uint32_t time = micros();
 
     // if (time - red_timer < 10000) {
     //   red = true;
@@ -266,7 +246,7 @@ int main(void) {
     // read_code();
 
     // if (code_num == 5) {
-    //   red_timer = my_micros();
+    //   red_timer = micros();
     //   phase += random(0, 255);
     // }
 
@@ -280,7 +260,7 @@ int main(void) {
     if (phase >= PHASE_MAX) {
       // emit_pulse(200);
       send_code(170);
-      // flash_led_rgb();
+      flash_led_rgb();
       // beep(phase);
 
       phase = 0;
