@@ -1,90 +1,130 @@
 #include <Arduino.h>
 #include <avr/io.h>
-#include <stdint.h>
+
+// ----------- CONFIG -----------
 
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
-// Pins
+#define ON_PERIOD_MIN     1    // total ON phase length (e.g. 2 hours)
+#define OFF_PERIOD_MIN    2    // total OFF phase length (e.g. 4 hours)
+
+// ON phase behavior
+#define ON_FLOOD_DURATION      60000UL        // 1 minute
+#define ON_FLOOD_INTERVAL      (10UL * 60000UL)  // every 10 minutes
+
+// OFF phase behavior
+#define OFF_FLOOD_DURATION     10000UL        // 10 seconds
+#define OFF_FLOOD_INTERVAL     (60UL * 60000UL)  // every 1 hour
+
+#define FRAME_SPACING_MS  25
+
 #define IR_TX PB1
 
-// -------- Setup --------
-void setup() {
-    // IR emitter as output
-    DDRB |= (1 << IR_TX);
-    PORTB &= ~(1 << IR_TX);
-}
 
-// -------- IR Carrier Burst --------
+// ----------- IR LOW-LEVEL -----------
+
 void emit_pulse(uint16_t cycles) {
-    for (uint16_t i = 0; i < cycles; i++) {
-        PORTB |= (1 << IR_TX);
-        delayMicroseconds(15);
-        PORTB &= ~(1 << IR_TX);
-        delayMicroseconds(15);
-    }
+  for (uint16_t i = 0; i < cycles; i++) {
+    PORTB |= (1 << IR_TX);
+    delayMicroseconds(15);
+    PORTB &= ~(1 << IR_TX);
+    delayMicroseconds(15);
+  }
 }
 
 static inline void mark_us(uint16_t us) {
-    uint16_t cycles = us / 30;
-    if (cycles < 1) cycles = 1;
-    emit_pulse(cycles);
+  uint16_t cycles = us / 30;
+  if (cycles < 1) cycles = 1;
+  emit_pulse(cycles);
 }
 
 static inline void space_us(uint16_t us) {
-    PORTB &= ~(1 << IR_TX);
-    delayMicroseconds(us);
+  PORTB &= ~(1 << IR_TX);
+  delayMicroseconds(us);
 }
 
-// -------- Frame Sender --------
-void send_code(uint8_t value) {
 
-    // Start burst
-    mark_us(6000);
-    space_us(3000);
+// ----------- FRAME FORMAT -----------
 
-    // 8 bits MSB first
-    for (int8_t i = 7; i >= 0; i--) {
+void send_code(uint8_t v) {
 
-        if (value & (1 << i)) {
-            mark_us(2000);   // logical 1
-            space_us(2000);
-        } else {
-            mark_us(1000);   // logical 0
-            space_us(3000);
-        }
+  // Start
+  mark_us(6000);
+  space_us(3000);
+
+  // 8 bits MSB first
+  for (int8_t i = 7; i >= 0; i--) {
+    if (v & (1 << i)) {
+      mark_us(2000);
+      space_us(2000);
+    } else {
+      mark_us(1000);
+      space_us(3000);
     }
+  }
 
-    // End gap
-    space_us(6000);
+  // End gap
+  space_us(6000);
 }
 
-// -------- Main --------
+
+// ----------- MAIN -----------
+
 int main(void) {
 
-    init();
-    setup();
+  init();
 
-    while (1) {
+  DDRB |= (1 << IR_TX);
+  PORTB &= ~(1 << IR_TX);
 
-        // ---- TURN ON for 10 seconds ----
-        uint32_t start = millis();
-        while (millis() - start < 10000UL) {
-            send_code(CODE_TURN_ON);
-            delay(20);
-        }
+  bool in_on_phase = true;
 
-        // ---- Wait 1 minute ----
-        uint32_t waitStart = millis();
-        while (millis() - waitStart < 60000UL) {
-            delay(100);
-        }
+  uint32_t phase_start = millis();
+  uint32_t last_flood_start = 0;
 
-        // ---- TURN OFF for 10 seconds ----
-        start = millis();
-        while (millis() - start < 10000UL) {
-            send_code(CODE_TURN_OFF);
-            delay(20);
-        }
+  while (1) {
+
+    uint32_t now = millis();
+
+    // ---------- Determine current phase ----------
+    uint32_t phase_duration =
+      (in_on_phase ? ON_PERIOD_MIN : OFF_PERIOD_MIN) * 60000UL;
+
+    if (now - phase_start >= phase_duration) {
+      in_on_phase = !in_on_phase;
+      phase_start = now;
+      last_flood_start = 0;   // reset scheduling
     }
+
+    // ---------- Select flood parameters ----------
+    uint32_t flood_interval =
+      in_on_phase ? ON_FLOOD_INTERVAL : OFF_FLOOD_INTERVAL;
+
+    uint32_t flood_duration =
+      in_on_phase ? ON_FLOOD_DURATION : OFF_FLOOD_DURATION;
+
+    uint8_t current_code =
+      in_on_phase ? CODE_TURN_ON : CODE_TURN_OFF;
+
+    // ---------- Should we start a new flood? ----------
+    if (last_flood_start == 0 ||
+        now - last_flood_start >= flood_interval) {
+
+        last_flood_start = now;
+    }
+
+    // ---------- Are we inside flood window? ----------
+    if (now - last_flood_start < flood_duration) {
+
+        send_code(current_code);
+        delay(FRAME_SPACING_MS);
+    }
+    else {
+        // quiet period
+        delay(200);
+    }
+  }
+
+  return 0;
 }
