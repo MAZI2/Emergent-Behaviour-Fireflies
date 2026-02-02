@@ -16,6 +16,22 @@
 #include <Adafruit_NeoPixel.h>
 #include <avr/interrupt.h>
 
+#define CODE_TURN_ON   0xA5
+#define CODE_TURN_OFF  0x5A
+
+enum SystemState {
+    STATE_SLEEP,
+    STATE_PROPAGATE_ON,
+    STATE_ACTIVE,
+    STATE_PROPAGATE_OFF
+};
+
+SystemState system_state = STATE_SLEEP;
+
+uint32_t state_timer = 0;
+
+
+
 
 // ===== HARDWARE CONFIGURATION =====
 #define NEOPIXEL_PIN    PB2
@@ -420,6 +436,35 @@ int main(void) {
     bool half_chirped = false;
 
     while (1) {
+      switch (system_state) {
+
+        case STATE_SLEEP:
+          // ultra quiet mode
+          strip.clear();
+          strip.show();
+          break;
+
+        case STATE_PROPAGATE_ON:
+          send_code(CODE_TURN_ON);
+
+          if (millis() - state_timer > 10000UL) {
+            system_state = STATE_ACTIVE;
+          }
+          break;
+
+        case STATE_ACTIVE:
+          // your entire oscillator + sync logic runs here
+          break;
+
+        case STATE_PROPAGATE_OFF:
+          send_code(CODE_TURN_OFF);
+
+          if (millis() - state_timer > 10000UL) {
+            system_state = STATE_SLEEP;
+          }
+          break;
+        }
+
       // _delay_ms(TICK_DELAY_MS);
       uint32_t time = micros();
 
@@ -432,112 +477,125 @@ int main(void) {
       // }
       uint8_t rx;
       if (decode_frame(rx)) {
-        if (rx == 170) {
-          strip.setPixelColor(0, strip.Color(255, 0, 0)); // red flash on ANY decoded byte
-          strip.show();
-          delay(50);
-          strip.clear();
-          strip.show();
+        if (rx == CODE_TURN_ON && system_state == STATE_SLEEP) {
+            system_state = STATE_PROPAGATE_ON;
+            state_timer = millis();
+        }
 
-          // trigger behavior
-
-        // Freeze phase color at the moment of reception
-          uint8_t i = phase_index;  // use current gradient set
-
-          uint8_t target_r = GRADIENT_START_R[i] + ((uint16_t)(GRADIENT_END_R[i] - GRADIENT_START_R[i]) * phase) / PHASE_MAX;
-          uint8_t target_g = GRADIENT_START_G[i] + ((uint16_t)(GRADIENT_END_G[i] - GRADIENT_START_G[i]) * phase) / PHASE_MAX;
-          uint8_t target_b = GRADIENT_START_B[i] + ((uint16_t)(GRADIENT_END_B[i] - GRADIENT_START_B[i]) * phase) / PHASE_MAX;
-
-
-          // Fade from red to frozen target color
-          const uint8_t steps = 100;
-          const uint16_t delay_ms = 10;
-
-          for (uint8_t i = 0; i <= steps; i++) {
-              uint16_t blend = ((uint16_t)i * 255) / steps;
-              uint16_t inv_blend = 255 - blend;
-
-              uint8_t r = (uint8_t)((255 * inv_blend + target_r * blend) / 255);
-              uint8_t g = (uint8_t)((0   * inv_blend + target_g * blend) / 255);
-              uint8_t b = (uint8_t)((0   * inv_blend + target_b * blend) / 255);
-
-              strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
-              strip.show();
-              chaotic_spiral_disrupt(1, delay_ms);
-          }
-
-          strip.setPixelColor(0, strip.Color(target_g, target_r, target_b));
-          strip.show();
-
-          code_num = 0;
-          code_received = false;
-          red = false;
-          red_timer = 0;
-
-          // Delay random phase jump *after* color is stable
-          phase += random(0, 255);
+        if (rx == CODE_TURN_OFF && system_state == STATE_ACTIVE) {
+            system_state = STATE_PROPAGATE_OFF;
+            state_timer = millis();
         }
       }
+      // if (decode_frame(rx)) {
+      //   if (rx == 170) {
+      //     strip.setPixelColor(0, strip.Color(255, 0, 0)); // red flash on ANY decoded byte
+      //     strip.show();
+      //     delay(50);
+      //     strip.clear();
+      //     strip.show();
 
-      if (time - timer > 2000) {
-        timer = time;
-          
-        set_fade_color(phase, (time - red_timer));
+      //     // trigger behavior
 
-        tick_counter++;
-        // if (tick_counter >= TICKS_PER_SWITCH) {
-        //     tick_counter = 0;
-        //     phase_index = (phase_index + 1) % PHASE_SEQUENCE_LEN;
-        //     PHASE_MAX = PHASE_SEQUENCE[phase_index];
-        //     phase = 0;
-        //     half_chirped = false;
-        // }
+      //   // Freeze phase color at the moment of reception
+      //     uint8_t i = phase_index;  // use current gradient set
 
-        // Advance phase
-        phase += PHASE_STEP;
-        if (phase > PHASE_MAX) {
-            phase = PHASE_MAX;
+      //     uint8_t target_r = GRADIENT_START_R[i] + ((uint16_t)(GRADIENT_END_R[i] - GRADIENT_START_R[i]) * phase) / PHASE_MAX;
+      //     uint8_t target_g = GRADIENT_START_G[i] + ((uint16_t)(GRADIENT_END_G[i] - GRADIENT_START_G[i]) * phase) / PHASE_MAX;
+      //     uint8_t target_b = GRADIENT_START_B[i] + ((uint16_t)(GRADIENT_END_B[i] - GRADIENT_START_B[i]) * phase) / PHASE_MAX;
+
+
+      //     // Fade from red to frozen target color
+      //     const uint8_t steps = 100;
+      //     const uint16_t delay_ms = 10;
+
+      //     for (uint8_t i = 0; i <= steps; i++) {
+      //         uint16_t blend = ((uint16_t)i * 255) / steps;
+      //         uint16_t inv_blend = 255 - blend;
+
+      //         uint8_t r = (uint8_t)((255 * inv_blend + target_r * blend) / 255);
+      //         uint8_t g = (uint8_t)((0   * inv_blend + target_g * blend) / 255);
+      //         uint8_t b = (uint8_t)((0   * inv_blend + target_b * blend) / 255);
+
+      //         strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
+      //         strip.show();
+      //         chaotic_spiral_disrupt(1, delay_ms);
+      //     }
+
+      //     strip.setPixelColor(0, strip.Color(target_g, target_r, target_b));
+      //     strip.show();
+
+      //     code_num = 0;
+      //     code_received = false;
+      //     red = false;
+      //     red_timer = 0;
+
+      //     // Delay random phase jump *after* color is stable
+      //     phase += random(0, 255);
+      //   }
+      // }
+
+      if (system_state == STATE_ACTIVE) {
+        if (time - timer > 2000) {
+          timer = time;
+            
+          set_fade_color(phase, (time - red_timer));
+
+          tick_counter++;
+          // if (tick_counter >= TICKS_PER_SWITCH) {
+          //     tick_counter = 0;
+          //     phase_index = (phase_index + 1) % PHASE_SEQUENCE_LEN;
+          //     PHASE_MAX = PHASE_SEQUENCE[phase_index];
+          //     phase = 0;
+          //     half_chirped = false;
+          // }
+
+          // Advance phase
+          phase += PHASE_STEP;
+          if (phase > PHASE_MAX) {
+              phase = PHASE_MAX;
+          }
+
+          if ((phase >= (PHASE_MAX / 2)) && !half_chirped) {
+              half_chirp();
+              half_chirped = true;
+          }
+
+          if (phase >= PHASE_MAX) {
+              emit_ir_pulse(200);
+              chirp();
+              phase = 0;
+              half_chirped = false;
+              refractory = REFRACTORY_FLASH;
+          }
+
+          uint8_t current_rx = (PINB & (1 << IR_RX));
+
+          if (last_rx_state && !current_rx && refractory == 0) {
+              if (phase > (PHASE_MAX / 4)) {
+                  uint16_t delta = ((uint32_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
+                  phase += delta;
+                  if (phase > PHASE_MAX) {
+                      phase = PHASE_MAX;
+                  }
+                  if (PHASE_MAX - phase < JUMP_TO_FLASH_MARGIN) {
+                      emit_ir_pulse(200);
+                      chirp();
+                      phase = 0;
+                      half_chirped = false;
+                      refractory = REFRACTORY_FLASH;
+                  } else {
+                      refractory = REFRACTORY_TRIGGER;
+                  }
+              }
+          }
+
+          if (refractory > 0) {
+              refractory--;
+          }
+
+          last_rx_state = current_rx;
         }
-
-        if ((phase >= (PHASE_MAX / 2)) && !half_chirped) {
-            half_chirp();
-            half_chirped = true;
-        }
-
-        if (phase >= PHASE_MAX) {
-            emit_ir_pulse(200);
-            chirp();
-            phase = 0;
-            half_chirped = false;
-            refractory = REFRACTORY_FLASH;
-        }
-
-        uint8_t current_rx = (PINB & (1 << IR_RX));
-
-        if (last_rx_state && !current_rx && refractory == 0) {
-            if (phase > (PHASE_MAX / 4)) {
-                uint16_t delta = ((uint32_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
-                phase += delta;
-                if (phase > PHASE_MAX) {
-                    phase = PHASE_MAX;
-                }
-                if (PHASE_MAX - phase < JUMP_TO_FLASH_MARGIN) {
-                    emit_ir_pulse(200);
-                    chirp();
-                    phase = 0;
-                    half_chirped = false;
-                    refractory = REFRACTORY_FLASH;
-                } else {
-                    refractory = REFRACTORY_TRIGGER;
-                }
-            }
-        }
-
-        if (refractory > 0) {
-            refractory--;
-        }
-
-        last_rx_state = current_rx;
       }
     }
 
