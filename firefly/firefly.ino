@@ -1,5 +1,5 @@
 /*
- * Firefly Synchronization Device
+ * Firefly Synchronization Device (corrected + hardened)
  *
  * States:
  *  - SLEEP: minimal activity, wakes on IR edges (PCINT0)
@@ -8,11 +8,17 @@
  *  - ACTIVE: full oscillator + phase-shift listening + flash TX
  *  - PROPAGATE_OFF: everything OFF (no LED/buzzer), only relays TURN_OFF frames for PROPAGATE_OFF_TIME
  *
- * Key fixes for “erratic” behavior during PROPAGATE_ON:
- *  1) Propagation TX (send_code) is blocking ~40-50ms per frame, which “steals time” from the 2ms tick loop.
- *     We compensate by advancing `timer` by exactly the time spent transmitting.
- *  2) While we transmit, we temporarily DISABLE the IR receiver pin-change interrupt to avoid self-reception
- *     (your own IR LED coupling into the TSOP and filling the pulse queue).
+ * Fixes / hardening included:
+ *  1) Disable PCINT during IR TX to avoid self-reception.
+ *  2) Compensate oscillator timing for blocking propagation TX during PROPAGATE_ON.
+ *  3) Two-in-a-row confirmation required for TURN_ON / TURN_OFF within 10s.
+ *     - Random/unknown frames do NOT break the chain.
+ *     - Opposite valid command resets the chain.
+ *  4) 5-minute cooldown after PROPAGATE_ON ends AND after PROPAGATE_OFF ends.
+ *  5) Symmetry: TURN_ON and TURN_OFF triggers allowed from SLEEP or ACTIVE (after cooldown).
+ *  6) "Dangerous bug fixes":
+ *     - Expire pending command when confirmation window passes (clears stale pending state).
+ *     - Clear pending command when entering propagation states (no cross-state accidental confirms).
  */
 
 #include <Arduino.h>
@@ -26,14 +32,19 @@
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
-// ---- Propagation timing (DEFINE as requested) ----
+// ---- Propagation timing ----
 #define PROPAGATE_ON_TIME       60000UL   // 60 seconds
 #define PROPAGATE_OFF_TIME      20000UL   // 20 seconds
 
 #define PROPAGATION_INTERVAL_MS   800UL   // send every X ms
 #define PROPAGATION_BURSTS          1     // frames per interval
 
-#define TURN_ON_COOLDOWN_MS 300000UL
+// ---- Cooldowns ----
+#define TURN_ON_COOLDOWN_MS     300000UL  // 5 minutes
+#define TURN_OFF_COOLDOWN_MS    300000UL  // 5 minutes
+
+// ---- Confirmation gating ----
+#define COMMAND_CONFIRM_WINDOW_MS 10000UL // 10 seconds
 
 // ---- Oscillator tick ----
 #define OSC_TICK_US             2000UL    // 2ms update cadence
@@ -49,8 +60,14 @@ SystemState system_state = STATE_SLEEP;
 
 uint32_t state_timer = 0;
 uint32_t last_propagation_send = 0;
-uint32_t last_propagate_on_end = 0;
 
+// Cooldown reference times (recorded when propagation windows END)
+uint32_t last_propagate_on_end  = 0;
+uint32_t last_propagate_off_end = 0;
+
+// Two-hit confirmation state
+uint8_t  pending_command      = 0;  // 0 or CODE_TURN_ON / CODE_TURN_OFF
+uint32_t pending_command_time = 0;
 
 // ===== HARDWARE CONFIGURATION =====
 #define NEOPIXEL_PIN    PB2
@@ -146,7 +163,7 @@ void setup_hardware(void) {
   // IR pins
   DDRB |= (1 << IR_TX);      // IR emitter output
   DDRB &= ~(1 << IR_RX);     // IR receiver input
-  PORTB |= (1 << IR_RX);     // pull-up on receiver pin (TSOP is active low output, but pull-up ok)
+  PORTB |= (1 << IR_RX);     // pull-up on receiver pin
 
   // LED/buzzer pins
   DDRB |= (1 << LED);
@@ -210,7 +227,6 @@ void send_code(uint8_t v) {
 }
 
 /*
- * IMPORTANT FIX:
  * - disable PCINT during transmit to avoid self-reception filling pulse queue
  * - optionally compensate timer_us so oscillator time does not “jump” after long TX block
  */
@@ -225,7 +241,6 @@ void send_code_freeze(uint8_t v, bool compensate_timer) {
   // Re-enable receiver PCINT
   PCMSK |= (1 << PCINT0);
 
-  // Optional: compensate oscillator timer so it doesn't "catch up" violently
   if (compensate_timer) {
     timer_us += dt;
   }
@@ -345,16 +360,15 @@ int main(void) {
   timer_us = micros();
 
   while (1) {
+
     // ---------- STATE MACHINE ----------
     switch (system_state) {
 
       case STATE_SLEEP: {
-        // Optional: keep LED/buzzer off explicitly
         strip.clear();
         strip.show();
         PORTB &= ~(1 << BUZZER);
 
-        // IDLE sleep keeps timers running (micros/millis), wakes on PCINT0
         set_sleep_mode(SLEEP_MODE_IDLE);
         sleep_enable();
         sleep_cpu();
@@ -370,82 +384,67 @@ int main(void) {
           uint32_t t0 = micros();
 
           for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++) {
-              send_code_freeze(CODE_TURN_ON, false);
-              delay(5);
+            send_code_freeze(CODE_TURN_ON, false);
+            delay(5);
           }
 
+          // compensate oscillator time for the blocking TX we just did
           uint32_t dt = micros() - t0;
-          timer_us += dt; 
+          timer_us += dt;
 
           last_propagation_send = millis();
         }
 
-
-
-        // ---- IDENTICAL oscillator engine as ACTIVE ----
+        // ---- oscillator engine (same cadence as ACTIVE, but no phase-sync + no IR flash) ----
         uint32_t now = micros();
-        uint32_t elapsed = now - timer_us;
-
         if ((uint32_t)(now - timer_us) >= OSC_TICK_US) {
-            timer_us = now;
+          timer_us = now;
 
-            phase += PHASE_STEP;
+          phase += PHASE_STEP;
+          if (phase > PHASE_MAX) phase = PHASE_MAX;
 
+          uint8_t r = 0;
+          uint8_t g = 0;
+          uint8_t b = (uint16_t)phase * 255 / PHASE_MAX;
+          strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
+          strip.show();
 
-            if (phase > PHASE_MAX)
-                phase = PHASE_MAX;
+          if ((phase >= (PHASE_MAX / 2)) && !half_chirped) {
+            half_chirp();
+            half_chirped = true;
+          }
 
-            uint8_t r = 0;
-            uint8_t g = 0;
-            uint8_t b = (uint16_t)phase * 255 / PHASE_MAX;
-
-            strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
-            strip.show();
-            
-            //set_fade_color(phase, 0);
-
-            if ((phase >= (PHASE_MAX / 2)) && !half_chirped) {
-                half_chirp();
-                half_chirped = true;
-            }
-
-            if (phase >= PHASE_MAX) {
-                // NOTE: no emit_ir_pulse() here
-                chirp();
-                phase = 0;
-                half_chirped = false;
-            }
+          if (phase >= PHASE_MAX) {
+            chirp();
+            phase = 0;
+            half_chirped = false;
+          }
         }
 
         // ---- Transition to ACTIVE ----
         if ((uint32_t)(millis() - state_timer) >= PROPAGATE_ON_TIME) {
           system_state = STATE_ACTIVE;
-
-          last_propagate_on_end = millis();   // ← remember when it ended
+          last_propagate_on_end = millis(); // cooldown reference time
 
           timer_us = micros();
           half_chirped = false;
           refractory = 0;
         }
 
-
         break;
       }
-
 
       case STATE_ACTIVE:
         // handled in the “ACTIVE loop” below
         break;
 
       case STATE_PROPAGATE_OFF: {
-        // Everything off visually & audibly
         strip.clear();
         strip.show();
         PORTB &= ~(1 << BUZZER);
 
         if ((uint32_t)(millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
           for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++) {
-            // no need to compensate timer_us here, but we DO disable PCINT during TX to avoid self RX
             send_code_freeze(CODE_TURN_OFF, false);
             delay(5);
           }
@@ -454,47 +453,95 @@ int main(void) {
 
         if ((uint32_t)(millis() - state_timer) >= PROPAGATE_OFF_TIME) {
           system_state = STATE_SLEEP;
+          last_propagate_off_end = millis(); // cooldown reference time
         }
+
         break;
       }
     }
 
-    // ---------- ALWAYS: decode TURN_ON / TURN_OFF frames ----------
+    // ---------- ALWAYS: decode frames ----------
     uint8_t rx;
     if (decode_frame(rx)) {
-      if (rx == CODE_TURN_ON) {
 
-        uint32_t now_ms = millis();
+      uint32_t now_ms = millis();
 
-        bool recently_propagated =
-          (last_propagate_on_end != 0) &&
-          ((uint32_t)(now_ms - last_propagate_on_end) < TURN_ON_COOLDOWN_MS);
+      // Bug fix: expire pending if window passed (prevents stale pending state)
+      if (pending_command != 0 &&
+          (uint32_t)(now_ms - pending_command_time) > COMMAND_CONFIRM_WINDOW_MS) {
+        pending_command = 0;
+        pending_command_time = 0;
+      }
 
-        if (!recently_propagated &&
-            (system_state == STATE_SLEEP ||
-            system_state == STATE_ACTIVE)) {
+      bool is_valid_command = (rx == CODE_TURN_ON) || (rx == CODE_TURN_OFF);
 
-            system_state = STATE_PROPAGATE_ON;
+      if (is_valid_command) {
 
-            state_timer = now_ms;
-            last_propagation_send = now_ms;
+        // confirmed if same command repeats within window
+        if (pending_command == rx &&
+            (uint32_t)(now_ms - pending_command_time) <= COMMAND_CONFIRM_WINDOW_MS) {
 
-            timer_us = micros();
-            phase = 0;
-            half_chirped = false;
-            refractory = 0;
+          // confirmed: clear pending
+          pending_command = 0;
+          pending_command_time = 0;
+
+          // -------- TURN ON confirmed --------
+          if (rx == CODE_TURN_ON) {
+
+            bool recently_propagated =
+              (last_propagate_on_end != 0) &&
+              ((uint32_t)(now_ms - last_propagate_on_end) < TURN_ON_COOLDOWN_MS);
+
+            if (!recently_propagated &&
+                (system_state == STATE_SLEEP || system_state == STATE_ACTIVE)) {
+
+              system_state = STATE_PROPAGATE_ON;
+
+              // clear pending when acting (prevents cross-state accidental confirms)
+              pending_command = 0;
+              pending_command_time = 0;
+
+              state_timer = now_ms;
+              last_propagation_send = now_ms;
+
+              timer_us = micros();
+              phase = 0;
+              half_chirped = false;
+              refractory = 0;
+            }
+          }
+
+          // -------- TURN OFF confirmed --------
+          if (rx == CODE_TURN_OFF) {
+
+            bool recently_propagated =
+              (last_propagate_off_end != 0) &&
+              ((uint32_t)(now_ms - last_propagate_off_end) < TURN_OFF_COOLDOWN_MS);
+
+            // Symmetry: allow OFF propagation from SLEEP or ACTIVE (after cooldown)
+            if (!recently_propagated &&
+                (system_state == STATE_SLEEP || system_state == STATE_ACTIVE)) {
+
+              system_state = STATE_PROPAGATE_OFF;
+
+              // clear pending when acting
+              pending_command = 0;
+              pending_command_time = 0;
+
+              state_timer = now_ms;
+              last_propagation_send = now_ms;
+            }
+          }
+
+        } else {
+          // First hit OR different valid command (opposite command resets chain)
+          pending_command = rx;
+          pending_command_time = now_ms;
         }
       }
 
-
-      // -------- TURN OFF --------
-      if (rx == CODE_TURN_OFF &&
-          system_state == STATE_ACTIVE) {
-
-          system_state = STATE_PROPAGATE_OFF;
-          state_timer = millis();
-          last_propagation_send = millis();
-      }
+      // If rx is NOT CODE_TURN_ON or CODE_TURN_OFF:
+      // do absolutely nothing (does not break chain)
     }
 
     // ---------- ACTIVE oscillator + phase shift listening ----------

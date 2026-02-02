@@ -6,8 +6,8 @@
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
-#define ON_PERIOD_MIN     1    // total ON phase length (e.g. 2 hours)
-#define OFF_PERIOD_MIN    2    // total OFF phase length (e.g. 4 hours)
+#define ON_PERIOD_MIN     60    // total ON phase length (e.g. 2 hours)
+#define OFF_PERIOD_MIN    60    // total OFF phase length (e.g. 4 hours)
 
 // ON phase behavior
 #define ON_FLOOD_DURATION      60000UL        // 1 minute
