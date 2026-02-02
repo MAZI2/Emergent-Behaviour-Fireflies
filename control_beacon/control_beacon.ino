@@ -1,12 +1,20 @@
 #include <Arduino.h>
 #include <avr/io.h>
 
+#include <Adafruit_NeoPixel.h>
+
+#define RGB_PIN PB2
+#define NUM_PIXELS 1
+
+Adafruit_NeoPixel strip(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
+
+
 // ----------- CONFIG -----------
 
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
-#define ON_PERIOD_MIN     60    // total ON phase length (e.g. 2 hours)
+#define ON_PERIOD_MIN     180    // total ON phase length (e.g. 2 hours)
 #define OFF_PERIOD_MIN    60    // total OFF phase length (e.g. 4 hours)
 
 // ON phase behavior
@@ -75,6 +83,12 @@ int main(void) {
 
   init();
 
+  strip.begin();
+  strip.setBrightness(20);   // dim (0–255)
+  strip.clear();
+  strip.show();
+
+
   DDRB |= (1 << IR_TX);
   PORTB &= ~(1 << IR_TX);
 
@@ -113,6 +127,25 @@ int main(void) {
 
         last_flood_start = now;
     }
+
+    bool in_flood_window = (now - last_flood_start < flood_duration);
+
+    // ---------- RGB STATUS INDICATOR ----------
+    if (in_flood_window) {
+        if (in_on_phase) {
+            // Emitting TURN_ON
+            strip.setPixelColor(0, strip.Color(0, 50, 0));   // dim green
+        } else {
+            // Emitting TURN_OFF
+            strip.setPixelColor(0, strip.Color(50, 0, 0));   // dim red
+        }
+    } else {
+        // Quiet
+        strip.setPixelColor(0, strip.Color(0, 0, 50));       // dim blue
+    }
+
+    strip.show();
+
 
     // ---------- Are we inside flood window? ----------
     if (now - last_flood_start < flood_duration) {
