@@ -210,9 +210,14 @@ static inline void space_us(uint16_t us) {
 // 1-bit: 2000 mark + 2000 space
 // End:   6000 space
 void send_code(uint8_t v) {
+
+  uint8_t inv = ~v;
+
+  // START
   mark_us(6000);
   space_us(3000);
 
+  // First byte
   for (int8_t i = 7; i >= 0; i--) {
     if (v & (1 << i)) {
       mark_us(2000);
@@ -223,8 +228,20 @@ void send_code(uint8_t v) {
     }
   }
 
+  // Second byte (inverted)
+  for (int8_t i = 7; i >= 0; i--) {
+    if (inv & (1 << i)) {
+      mark_us(2000);
+      space_us(2000);
+    } else {
+      mark_us(1000);
+      space_us(3000);
+    }
+  }
+
   space_us(6000);
 }
+
 
 /*
  * - disable PCINT during transmit to avoid self-reception filling pulse queue
@@ -255,18 +272,21 @@ static inline bool pulse_pop(uint16_t &w) {
 }
 
 bool decode_frame(uint8_t &out) {
+
   static bool in_frame = false;
   static uint8_t bit_count = 0;
-  static uint8_t value = 0;
+  static uint16_t value = 0;  // now 16 bits
   static uint32_t last_activity = 0;
 
   uint16_t w;
+
   while (pulse_pop(w)) {
+
     last_activity = micros();
 
-    // START DETECT
+    // START detect
     if (!in_frame) {
-      if (w > 4500 && w < 9000) {   // ~6000us mark
+      if (w > 4500 && w < 9000) {
         in_frame = true;
         bit_count = 0;
         value = 0;
@@ -274,29 +294,42 @@ bool decode_frame(uint8_t &out) {
       continue;
     }
 
-    // BIT DECODE (width of LOW mark)
+    // Bit width check
     if (w < 300 || w > 3500) {
       in_frame = false;
       continue;
     }
 
     value <<= 1;
-    if (w > 1500) value |= 1;  // 1-bit ~2000us, 0-bit ~1000us
+    if (w > 1500) value |= 1;
+
     bit_count++;
 
-    if (bit_count >= 8) {
-      out = value;
+    if (bit_count >= 16) {
+
+      uint8_t first  = (value >> 8) & 0xFF;
+      uint8_t second = value & 0xFF;
+
       in_frame = false;
-      return true;
+
+      // Validate inverted pair
+      if ((uint8_t)~first == second) {
+        out = first;
+        return true;
+      }
+
+      return false;  // reject corrupted frame
     }
   }
 
-  // TIMEOUT
+  // timeout
   if (in_frame && (micros() - last_activity > 60000UL)) {
     in_frame = false;
   }
+
   return false;
 }
+
 
 // ======================= AUDIO / LED =======================
 void delay_us_custom(uint16_t us) {

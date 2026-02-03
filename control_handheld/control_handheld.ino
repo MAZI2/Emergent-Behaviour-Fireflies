@@ -50,11 +50,13 @@ static inline void space_us(uint16_t us) {
 
 void send_code(uint8_t v) {
 
-  // Start
+  uint8_t inv = ~v;
+
+  // START
   mark_us(6000);
   space_us(3000);
 
-  // 8 bits MSB first
+  // First byte
   for (int8_t i = 7; i >= 0; i--) {
     if (v & (1 << i)) {
       mark_us(2000);
@@ -65,7 +67,17 @@ void send_code(uint8_t v) {
     }
   }
 
-  // End gap
+  // Second byte (inverted)
+  for (int8_t i = 7; i >= 0; i--) {
+    if (inv & (1 << i)) {
+      mark_us(2000);
+      space_us(2000);
+    } else {
+      mark_us(1000);
+      space_us(3000);
+    }
+  }
+
   space_us(6000);
 }
 
