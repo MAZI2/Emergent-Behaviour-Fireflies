@@ -14,16 +14,15 @@ Adafruit_NeoPixel strip(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
-#define ON_PERIOD_MIN     180    // total ON phase length (e.g. 2 hours)
-#define OFF_PERIOD_MIN    60    // total OFF phase length (e.g. 4 hours)
+#define ON_PERIOD_MIN     180    // after this, switch to OFF phase until power cycle
 
 // ON phase behavior
 #define ON_FLOOD_DURATION      60000UL        // 1 minute
 #define ON_FLOOD_INTERVAL      (10UL * 60000UL)  // every 10 minutes
 
 // OFF phase behavior
-#define OFF_FLOOD_DURATION     10000UL        // 10 seconds
-#define OFF_FLOOD_INTERVAL     (60UL * 60000UL)  // every 1 hour
+#define OFF_FLOOD_DURATION     60000UL        // 1 minute
+#define OFF_FLOOD_INTERVAL     (5UL * 60000UL)   // every 5 minutes
 
 #define FRAME_SPACING_MS  25
 
@@ -115,11 +114,8 @@ int main(void) {
     uint32_t now = millis();
 
     // ---------- Determine current phase ----------
-    uint32_t phase_duration =
-      (in_on_phase ? ON_PERIOD_MIN : OFF_PERIOD_MIN) * 60000UL;
-
-    if (now - phase_start >= phase_duration) {
-      in_on_phase = !in_on_phase;
+    if (in_on_phase && now - phase_start >= ON_PERIOD_MIN * 60000UL) {
+      in_on_phase = false;
       phase_start = now;
       last_flood_start = 0;   // reset scheduling
     }

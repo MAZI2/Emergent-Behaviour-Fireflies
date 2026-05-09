@@ -1,5 +1,7 @@
 /*
- * Firefly Synchronization Device (corrected + hardened)
+ * Firefly Synchronization Device (test variant)
+ * - Starts ACTIVE on boot
+ * - Responds to TURN_ON and TURN_OFF
  *
  * States:
  *  - SLEEP: minimal activity, wakes on IR edges (PCINT0)
@@ -19,8 +21,6 @@
  *  6) "Dangerous bug fixes":
  *     - Expire pending command when confirmation window passes (clears stale pending state).
  *     - Clear pending command when entering propagation states (no cross-state accidental confirms).
- *  7) Deep power-down in SLEEP, with a short post-wake listen window for repeated IR frames.
- *  8) Disable unused ADC/comparator/USI/Timer1 power domains.
  */
 
 #include <Arduino.h>
@@ -48,11 +48,6 @@
 // ---- Confirmation gating ----
 #define COMMAND_CONFIRM_WINDOW_MS 10000UL // 10 seconds
 
-// ---- Deep sleep wake handling ----
-// A wake edge can arrive in the middle of a frame. Stay awake briefly so the
-// repeated beacon/relay frames can be decoded after the oscillator restarts.
-#define SLEEP_LISTEN_WINDOW_MS   250UL
-
 // ---- Oscillator tick ----
 #define OSC_TICK_US             2000UL    // 2ms update cadence
 
@@ -63,7 +58,7 @@ enum SystemState {
   STATE_PROPAGATE_OFF
 };
 
-SystemState system_state = STATE_SLEEP;
+SystemState system_state = STATE_ACTIVE;
 
 uint32_t state_timer = 0;
 uint32_t last_propagation_send = 0;
@@ -110,7 +105,6 @@ volatile uint8_t q_tail = 0;
 
 volatile uint32_t last_edge_us = 0;
 volatile uint8_t last_level = 1;   // TSOP idle HIGH
-volatile bool reset_decoder_state = false;
 
 ISR(PCINT0_vect) {
   uint8_t level = (PINB & (1 << IR_RX)) ? 1 : 0;
@@ -165,11 +159,6 @@ void half_chirp(void);
 void set_fade_color(uint16_t phase, uint32_t diff);
 void send_code(uint8_t v);
 void send_code_freeze(uint8_t v, bool compensate_timer);
-void setup_low_power(void);
-void enter_power_down_sleep(void);
-void enter_idle_sleep(void);
-void apply_state_entry_outputs(SystemState state);
-void reset_ir_receiver_state(void);
 
 // ======================= HARDWARE SETUP =======================
 void setup_hardware(void) {
@@ -194,44 +183,6 @@ void setup_hardware(void) {
   strip.begin();
   strip.clear();
   strip.show();
-}
-
-void setup_low_power(void) {
-  // These peripherals are not used by the show logic. Timer0 stays enabled
-  // because Arduino millis()/micros() depend on it while awake.
-  ADCSRA &= ~(1 << ADEN);                    // ADC off
-  ACSR |= (1 << ACD);                        // analog comparator off
-  PRR |= (1 << PRADC) | (1 << PRUSI) | (1 << PRTIM1);
-}
-
-void enter_power_down_sleep(void) {
-  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-
-  cli();
-  sleep_enable();
-
-  #if defined(BODS) && defined(BODSE)
-    sleep_bod_disable();
-  #endif
-
-  sei();
-  sleep_cpu();
-  sleep_disable();
-}
-
-void enter_idle_sleep(void) {
-  set_sleep_mode(SLEEP_MODE_IDLE);
-  sleep_enable();
-  sleep_cpu();
-  sleep_disable();
-}
-
-void apply_state_entry_outputs(SystemState state) {
-  if (state == STATE_SLEEP || state == STATE_PROPAGATE_OFF) {
-    strip.clear();
-    strip.show();
-    PORTB &= ~(1 << BUZZER);
-  }
 }
 
 // ======================= IR TX LOW LEVEL =======================
@@ -296,7 +247,7 @@ void send_code(uint8_t v) {
 
 /*
  * - disable PCINT during transmit to avoid self-reception filling pulse queue
- * - optionally compensate timer_us so oscillator time does not “jump” after long TX block
+ * - optionally compensate timer_us so oscillator time does not "jump" after long TX block
  */
 void send_code_freeze(uint8_t v, bool compensate_timer) {
   // Disable pin-change interrupt on PB0 while we TX
@@ -322,34 +273,12 @@ static inline bool pulse_pop(uint16_t &w) {
   return true;
 }
 
-void reset_ir_receiver_state(void) {
-  uint32_t now_us = micros();
-  uint8_t now_level = (PINB & (1 << IR_RX)) ? 1 : 0;
-
-  uint8_t old_sreg = SREG;
-  cli();
-  q_head = 0;
-  q_tail = 0;
-  last_edge_us = now_us;
-  last_level = now_level;
-  reset_decoder_state = true;
-  SREG = old_sreg;
-}
-
 bool decode_frame(uint8_t &out) {
 
   static bool in_frame = false;
   static uint8_t bit_count = 0;
   static uint16_t value = 0;  // now 16 bits
   static uint32_t last_activity = 0;
-
-  if (reset_decoder_state) {
-    in_frame = false;
-    bit_count = 0;
-    value = 0;
-    last_activity = 0;
-    reset_decoder_state = false;
-  }
 
   uint16_t w;
 
@@ -457,36 +386,28 @@ int main(void) {
   init();   // Arduino core init (Timer0, micros/millis)
   sei();
   setup_hardware();
-  setup_low_power();
 
   uint16_t phase = 0;
   uint8_t last_rx_state = (PINB & (1 << IR_RX));
   uint8_t refractory = 0;
   bool half_chirped = false;
-  SystemState previous_state = (SystemState)255;
-  uint32_t sleep_listen_until = 0;
 
   timer_us = micros();
 
   while (1) {
 
-    if (system_state != previous_state) {
-      previous_state = system_state;
-      apply_state_entry_outputs(system_state);
-    }
-
     // ---------- STATE MACHINE ----------
     switch (system_state) {
 
       case STATE_SLEEP: {
-        if ((uint32_t)(millis() - sleep_listen_until) >= SLEEP_LISTEN_WINDOW_MS) {
-          reset_ir_receiver_state();
-          enter_power_down_sleep();
-          sleep_listen_until = millis();
-          reset_ir_receiver_state();
-        } else {
-          enter_idle_sleep();
-        }
+        strip.clear();
+        strip.show();
+        PORTB &= ~(1 << BUZZER);
+
+        set_sleep_mode(SLEEP_MODE_IDLE);
+        sleep_enable();
+        sleep_cpu();
+        sleep_disable();
         break;
       }
 
@@ -549,10 +470,14 @@ int main(void) {
       }
 
       case STATE_ACTIVE:
-        // handled in the “ACTIVE loop” below
+        // handled in the ACTIVE loop below
         break;
 
       case STATE_PROPAGATE_OFF: {
+        strip.clear();
+        strip.show();
+        PORTB &= ~(1 << BUZZER);
+
         if ((uint32_t)(millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
           for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++) {
             send_code_freeze(CODE_TURN_OFF, false);
@@ -564,8 +489,6 @@ int main(void) {
         if ((uint32_t)(millis() - state_timer) >= PROPAGATE_OFF_TIME) {
           system_state = STATE_SLEEP;
           last_propagate_off_end = millis(); // cooldown reference time
-        } else {
-          enter_idle_sleep();
         }
 
         break;
