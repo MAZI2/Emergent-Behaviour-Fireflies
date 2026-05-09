@@ -18,19 +18,27 @@ import sys
 import time
 from pathlib import Path
 
-import board
-import busio
-import adafruit_ads1x15.ads1115 as ADS
-from adafruit_ads1x15.analog_in import AnalogIn
+from smbus2 import SMBus
 
 
 GAIN_MAP = {
-    "2/3": 2 / 3,
-    "1": 1,
-    "2": 2,
-    "4": 4,
-    "8": 8,
-    "16": 16,
+    "2/3": (0x0000, 6.144),
+    "1": (0x0200, 4.096),
+    "2": (0x0400, 2.048),
+    "4": (0x0600, 1.024),
+    "8": (0x0800, 0.512),
+    "16": (0x0A00, 0.256),
+}
+
+DATA_RATE_MAP = {
+    8: 0x0000,
+    16: 0x0020,
+    32: 0x0040,
+    64: 0x0060,
+    128: 0x0080,
+    250: 0x00A0,
+    475: 0x00C0,
+    860: 0x00E0,
 }
 
 
@@ -45,17 +53,6 @@ class BeaconSwitch:
             return
 
         try:
-            from gpiozero import DigitalOutputDevice
-            self.device = DigitalOutputDevice(
-                gpio,
-                active_high=not active_low,
-                initial_value=False,
-            )
-            return
-        except Exception:
-            pass
-
-        try:
             import RPi.GPIO as GPIO
             GPIO.setmode(GPIO.BCM)
             GPIO.setup(gpio, GPIO.OUT, initial=self._physical_level(False, GPIO))
@@ -63,8 +60,8 @@ class BeaconSwitch:
             return
         except Exception as exc:
             raise RuntimeError(
-                "Beacon GPIO control requires gpiozero or RPi.GPIO. "
-                "Install one of them, or run with --no-beacon-gpio."
+                "Beacon GPIO control requires RPi.GPIO. "
+                "Install it, or run with --no-beacon-gpio."
             ) from exc
 
     def _physical_level(self, enabled: bool, gpio_module) -> int:
@@ -97,6 +94,74 @@ class BeaconSwitch:
             self.rpi_gpio.cleanup(self.gpio)
 
 
+class ADS1115:
+    REG_CONVERSION = 0x00
+    REG_CONFIG = 0x01
+
+    MUX_A0_A1 = 0x0000
+    MUX_A0_GND = 0x4000
+    MUX_A2_GND = 0x6000
+
+    OS_SINGLE = 0x8000
+    MODE_SINGLE = 0x0100
+    COMP_DISABLE = 0x0003
+
+    def __init__(
+        self,
+        bus: int,
+        address: int,
+        gain: str,
+        data_rate: int,
+    ) -> None:
+        if gain not in GAIN_MAP:
+            raise ValueError(f"Unsupported ADS1115 gain: {gain}")
+        if data_rate not in DATA_RATE_MAP:
+            raise ValueError(
+                f"Unsupported ADS1115 data rate: {data_rate}. "
+                f"Use one of {sorted(DATA_RATE_MAP)}."
+            )
+
+        self.bus = SMBus(bus)
+        self.address = address
+        self.gain_bits, self.full_scale_v = GAIN_MAP[gain]
+        self.data_rate = data_rate
+        self.data_rate_bits = DATA_RATE_MAP[data_rate]
+        self.lsb_v = self.full_scale_v / 32768.0
+
+    def close(self) -> None:
+        self.bus.close()
+
+    def read_diff_a0_a1(self) -> float:
+        return self._read_voltage(self.MUX_A0_A1)
+
+    def read_a0(self) -> float:
+        return self._read_voltage(self.MUX_A0_GND)
+
+    def read_a2(self) -> float:
+        return self._read_voltage(self.MUX_A2_GND)
+
+    def _read_voltage(self, mux_bits: int) -> float:
+        config = (
+            self.OS_SINGLE
+            | mux_bits
+            | self.gain_bits
+            | self.MODE_SINGLE
+            | self.data_rate_bits
+            | self.COMP_DISABLE
+        )
+        self.bus.write_i2c_block_data(
+            self.address,
+            self.REG_CONFIG,
+            [(config >> 8) & 0xFF, config & 0xFF],
+        )
+        time.sleep((1.0 / self.data_rate) + 0.0005)
+        data = self.bus.read_i2c_block_data(self.address, self.REG_CONVERSION, 2)
+        raw = (data[0] << 8) | data[1]
+        if raw & 0x8000:
+            raw -= 0x10000
+        return raw * self.lsb_v
+
+
 def parse_start_time(value: str, now: dt.datetime) -> dt.datetime | None:
     if value == "now":
         return now
@@ -126,7 +191,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="4",
         help="ADS1115 PGA gain. Use 4 for 10 ohm shunt, 8 for more resolution if peaks stay below about 51 mA.",
     )
-    parser.add_argument("--data-rate", type=int, default=860)
+    parser.add_argument("--data-rate", type=int, choices=DATA_RATE_MAP.keys(), default=860)
+    parser.add_argument("--i2c-bus", type=int, default=1)
+    parser.add_argument("--ads-address", type=lambda x: int(x, 0), default=0x48)
     parser.add_argument("--summary-interval", type=float, default=1.0)
     parser.add_argument("--duration-hours", type=float, default=24.0)
     parser.add_argument(
@@ -185,14 +252,12 @@ def main() -> int:
         active_low=args.beacon_active_low,
     )
 
-    i2c = busio.I2C(board.SCL, board.SDA)
-    ads = ADS.ADS1115(i2c)
-    ads.gain = GAIN_MAP[args.gain]
-    ads.data_rate = args.data_rate
-
-    shunt = AnalogIn(ads, ADS.P0, ADS.P1)
-    vcc = AnalogIn(ads, ADS.P2) if args.measure_voltage else None
-    firefly_gnd = AnalogIn(ads, ADS.P0) if args.measure_voltage else None
+    ads = ADS1115(
+        bus=args.i2c_bus,
+        address=args.ads_address,
+        gain=args.gain,
+        data_rate=args.data_rate,
+    )
 
     stop = False
 
@@ -267,14 +332,14 @@ def main() -> int:
                 dt_s = sample_now - last_sample
                 last_sample = sample_now
 
-                shunt_v = shunt.voltage
+                shunt_v = ads.read_diff_a0_a1()
                 current_mA = (shunt_v / args.shunt_ohms) * 1000.0
                 if not args.allow_negative and current_mA < 0.0:
                     current_mA = 0.0
 
                 load_v = None
-                if vcc is not None and firefly_gnd is not None:
-                    load_v = max(0.0, vcc.voltage - firefly_gnd.voltage)
+                if args.measure_voltage:
+                    load_v = max(0.0, ads.read_a2() - ads.read_a0())
 
                 sample_mAh = current_mA * dt_s / 3600.0
                 total_mAh += sample_mAh
@@ -333,6 +398,7 @@ def main() -> int:
 
     finally:
         beacon.close()
+        ads.close()
 
     print(f"Done. Total current draw: {total_mAh:.4f} mAh")
     if total_mWh > 0.0:

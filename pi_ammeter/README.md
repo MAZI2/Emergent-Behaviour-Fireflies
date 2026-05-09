@@ -90,16 +90,15 @@ Some relay modules are active-low. Use `--beacon-active-low` for those.
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install adafruit-circuitpython-ads1x15 gpiozero lgpio
+pip install smbus2 RPi.GPIO
 ```
 
-If `lgpio` fails to build on your Pi/Python version, use:
+If you do not want to use a GPIO-controlled beacon switch yet, you can install
+only:
 
 ```bash
-pip install adafruit-circuitpython-ads1x15 gpiozero RPi.GPIO
+pip install smbus2
 ```
-
-The script can use either `gpiozero` or `RPi.GPIO` for the beacon switch.
 
 ## Run
 
