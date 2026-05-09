@@ -37,6 +37,7 @@ GAIN_MAP = {
 class BeaconSwitch:
     def __init__(self, gpio: int | None, active_low: bool) -> None:
         self.device = None
+        self.rpi_gpio = None
         self.gpio = gpio
         self.active_low = active_low
 
@@ -45,30 +46,55 @@ class BeaconSwitch:
 
         try:
             from gpiozero import DigitalOutputDevice
-        except ImportError as exc:
+            self.device = DigitalOutputDevice(
+                gpio,
+                active_high=not active_low,
+                initial_value=False,
+            )
+            return
+        except Exception:
+            pass
+
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(gpio, GPIO.OUT, initial=self._physical_level(False, GPIO))
+            self.rpi_gpio = GPIO
+            return
+        except Exception as exc:
             raise RuntimeError(
-                "gpiozero is required for beacon GPIO control. "
-                "Install it or run with --no-beacon-gpio."
+                "Beacon GPIO control requires gpiozero or RPi.GPIO. "
+                "Install one of them, or run with --no-beacon-gpio."
             ) from exc
 
-        self.device = DigitalOutputDevice(
-            gpio,
-            active_high=not active_low,
-            initial_value=False,
-        )
+    def _physical_level(self, enabled: bool, gpio_module) -> int:
+        active = enabled
+        if self.active_low:
+            active = not active
+        return gpio_module.HIGH if active else gpio_module.LOW
 
     def set(self, enabled: bool) -> None:
-        if self.device is None:
-            return
-        if enabled:
-            self.device.on()
-        else:
-            self.device.off()
+        if self.device is not None:
+            if enabled:
+                self.device.on()
+            else:
+                self.device.off()
+        elif self.rpi_gpio is not None and self.gpio is not None:
+            self.rpi_gpio.output(
+                self.gpio,
+                self._physical_level(enabled, self.rpi_gpio),
+            )
 
     def close(self) -> None:
         if self.device is not None:
             self.device.off()
             self.device.close()
+        elif self.rpi_gpio is not None and self.gpio is not None:
+            self.rpi_gpio.output(
+                self.gpio,
+                self._physical_level(False, self.rpi_gpio),
+            )
+            self.rpi_gpio.cleanup(self.gpio)
 
 
 def parse_start_time(value: str, now: dt.datetime) -> dt.datetime | None:

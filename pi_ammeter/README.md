@@ -93,6 +93,14 @@ python3 -m venv .venv
 pip install adafruit-circuitpython-ads1x15 gpiozero lgpio
 ```
 
+If `lgpio` fails to build on your Pi/Python version, use:
+
+```bash
+pip install adafruit-circuitpython-ads1x15 gpiozero RPi.GPIO
+```
+
+The script can use either `gpiozero` or `RPi.GPIO` for the beacon switch.
+
 ## Run
 
 Start logging now, power the beacon now, turn it off after 4 hours, and keep
