@@ -14,6 +14,8 @@ import csv
 import datetime as dt
 import math
 import signal
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,10 +48,15 @@ class BeaconSwitch:
     def __init__(self, gpio: int | None, active_low: bool) -> None:
         self.device = None
         self.rpi_gpio = None
+        self.pinctrl = shutil.which("pinctrl")
         self.gpio = gpio
         self.active_low = active_low
 
         if gpio is None:
+            return
+
+        if self.pinctrl is not None:
+            self._pinctrl_set(False)
             return
 
         try:
@@ -60,9 +67,23 @@ class BeaconSwitch:
             return
         except Exception as exc:
             raise RuntimeError(
-                "Beacon GPIO control requires RPi.GPIO. "
-                "Install it, or run with --no-beacon-gpio."
+                "Beacon GPIO control requires the pinctrl command or RPi.GPIO. "
+                "Install/use one of them, or run with --no-beacon-gpio."
             ) from exc
+
+    def _pinctrl_level(self, enabled: bool) -> str:
+        active = enabled
+        if self.active_low:
+            active = not active
+        return "dh" if active else "dl"
+
+    def _pinctrl_set(self, enabled: bool) -> None:
+        if self.pinctrl is None or self.gpio is None:
+            return
+        subprocess.run(
+            [self.pinctrl, "set", str(self.gpio), "op", "pn", self._pinctrl_level(enabled)],
+            check=True,
+        )
 
     def _physical_level(self, enabled: bool, gpio_module) -> int:
         active = enabled
@@ -71,7 +92,9 @@ class BeaconSwitch:
         return gpio_module.HIGH if active else gpio_module.LOW
 
     def set(self, enabled: bool) -> None:
-        if self.device is not None:
+        if self.pinctrl is not None:
+            self._pinctrl_set(enabled)
+        elif self.device is not None:
             if enabled:
                 self.device.on()
             else:
@@ -83,7 +106,9 @@ class BeaconSwitch:
             )
 
     def close(self) -> None:
-        if self.device is not None:
+        if self.pinctrl is not None:
+            self._pinctrl_set(False)
+        elif self.device is not None:
             self.device.off()
             self.device.close()
         elif self.rpi_gpio is not None and self.gpio is not None:

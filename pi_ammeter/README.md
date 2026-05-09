@@ -90,14 +90,15 @@ Some relay modules are active-low. Use `--beacon-active-low` for those.
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install smbus2 RPi.GPIO
+pip install smbus2
 ```
 
-If you do not want to use a GPIO-controlled beacon switch yet, you can install
-only:
+On Raspberry Pi 5, the script uses the system `pinctrl` command for beacon GPIO
+control, so no Python GPIO package is required. On older Pis it can fall back to
+`RPi.GPIO`:
 
 ```bash
-pip install smbus2
+pip install RPi.GPIO
 ```
 
 ## Run
