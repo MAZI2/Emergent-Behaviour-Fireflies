@@ -30,13 +30,14 @@
 #include <Adafruit_NeoPixel.h>
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
+#include <avr/wdt.h>
 
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
 // ---- Propagation timing ----
 #define PROPAGATE_ON_TIME       60000UL   // 60 seconds
-#define PROPAGATE_OFF_TIME      20000UL   // 20 seconds
+#define PROPAGATE_OFF_TIME      120000UL  // 120 seconds
 
 #define PROPAGATION_INTERVAL_MS   800UL   // send every X ms
 #define PROPAGATION_BURSTS          1     // frames per interval
@@ -52,6 +53,9 @@
 // A wake edge can arrive in the middle of a frame. Stay awake briefly so the
 // repeated beacon/relay frames can be decoded after the oscillator restarts.
 #define SLEEP_LISTEN_WINDOW_MS   250UL
+
+// ---- Watchdog wall-clock while deep sleeping ----
+#define WATCHDOG_SLEEP_TICK_MS  8000UL
 
 // ---- Oscillator tick ----
 #define OSC_TICK_US             2000UL    // 2ms update cadence
@@ -111,6 +115,8 @@ volatile uint8_t q_tail = 0;
 volatile uint32_t last_edge_us = 0;
 volatile uint8_t last_level = 1;   // TSOP idle HIGH
 volatile bool reset_decoder_state = false;
+volatile uint32_t slept_wall_ms = 0;
+volatile bool watchdog_woke = false;
 
 ISR(PCINT0_vect) {
   uint8_t level = (PINB & (1 << IR_RX)) ? 1 : 0;
@@ -131,6 +137,11 @@ ISR(PCINT0_vect) {
     last_edge_us = now;
     last_level = level;
   }
+}
+
+ISR(WDT_vect) {
+  slept_wall_ms += WATCHDOG_SLEEP_TICK_MS;
+  watchdog_woke = true;
 }
 
 // ---- color gradients ----
@@ -166,10 +177,13 @@ void set_fade_color(uint16_t phase, uint32_t diff);
 void send_code(uint8_t v);
 void send_code_freeze(uint8_t v, bool compensate_timer);
 void setup_low_power(void);
-void enter_power_down_sleep(void);
+bool enter_power_down_sleep(void);
 void enter_idle_sleep(void);
 void apply_state_entry_outputs(SystemState state);
 void reset_ir_receiver_state(void);
+uint32_t wall_millis(void);
+void enable_watchdog_interrupt(void);
+void disable_watchdog(void);
 
 // ======================= HARDWARE SETUP =======================
 void setup_hardware(void) {
@@ -204,7 +218,43 @@ void setup_low_power(void) {
   PRR |= (1 << PRADC) | (1 << PRUSI) | (1 << PRTIM1);
 }
 
-void enter_power_down_sleep(void) {
+uint32_t wall_millis(void) {
+  uint8_t old_sreg = SREG;
+  cli();
+  uint32_t slept = slept_wall_ms;
+  SREG = old_sreg;
+  return millis() + slept;
+}
+
+#if defined(WDTCSR)
+  #define FIREFLY_WDT_REG WDTCSR
+#else
+  #define FIREFLY_WDT_REG WDTCR
+#endif
+
+void enable_watchdog_interrupt(void) {
+  uint8_t old_sreg = SREG;
+  cli();
+  wdt_reset();
+  MCUSR &= ~(1 << WDRF);
+  FIREFLY_WDT_REG |= (1 << WDCE) | (1 << WDE);
+  FIREFLY_WDT_REG = (1 << WDIE) | (1 << WDP3) | (1 << WDP0); // ~8s
+  SREG = old_sreg;
+}
+
+void disable_watchdog(void) {
+  uint8_t old_sreg = SREG;
+  cli();
+  wdt_reset();
+  FIREFLY_WDT_REG |= (1 << WDCE) | (1 << WDE);
+  FIREFLY_WDT_REG = 0;
+  SREG = old_sreg;
+}
+
+bool enter_power_down_sleep(void) {
+  watchdog_woke = false;
+  enable_watchdog_interrupt();
+
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
 
   cli();
@@ -217,6 +267,11 @@ void enter_power_down_sleep(void) {
   sei();
   sleep_cpu();
   sleep_disable();
+
+  bool woke_by_watchdog = watchdog_woke;
+  disable_watchdog();
+
+  return woke_by_watchdog;
 }
 
 void enter_idle_sleep(void) {
@@ -481,8 +536,10 @@ int main(void) {
       case STATE_SLEEP: {
         if ((uint32_t)(millis() - sleep_listen_until) >= SLEEP_LISTEN_WINDOW_MS) {
           reset_ir_receiver_state();
-          enter_power_down_sleep();
-          sleep_listen_until = millis();
+          bool woke_by_watchdog = enter_power_down_sleep();
+          if (!woke_by_watchdog) {
+            sleep_listen_until = millis();
+          }
           reset_ir_receiver_state();
         } else {
           enter_idle_sleep();
@@ -493,7 +550,7 @@ int main(void) {
       case STATE_PROPAGATE_ON: {
 
         // ---- Propagation sending (TURN_ON) ----
-        if ((uint32_t)(millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
+        if ((uint32_t)(wall_millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
 
           uint32_t t0 = micros();
 
@@ -506,7 +563,7 @@ int main(void) {
           uint32_t dt = micros() - t0;
           timer_us += dt;
 
-          last_propagation_send = millis();
+          last_propagation_send = wall_millis();
         }
 
         // ---- oscillator engine (same cadence as ACTIVE, but no phase-sync + no IR flash) ----
@@ -536,9 +593,9 @@ int main(void) {
         }
 
         // ---- Transition to ACTIVE ----
-        if ((uint32_t)(millis() - state_timer) >= PROPAGATE_ON_TIME) {
+        if ((uint32_t)(wall_millis() - state_timer) >= PROPAGATE_ON_TIME) {
           system_state = STATE_ACTIVE;
-          last_propagate_on_end = millis(); // cooldown reference time
+          last_propagate_on_end = wall_millis(); // cooldown reference time
 
           timer_us = micros();
           half_chirped = false;
@@ -553,17 +610,17 @@ int main(void) {
         break;
 
       case STATE_PROPAGATE_OFF: {
-        if ((uint32_t)(millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
+        if ((uint32_t)(wall_millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
           for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++) {
             send_code_freeze(CODE_TURN_OFF, false);
             delay(5);
           }
-          last_propagation_send = millis();
+          last_propagation_send = wall_millis();
         }
 
-        if ((uint32_t)(millis() - state_timer) >= PROPAGATE_OFF_TIME) {
+        if ((uint32_t)(wall_millis() - state_timer) >= PROPAGATE_OFF_TIME) {
           system_state = STATE_SLEEP;
-          last_propagate_off_end = millis(); // cooldown reference time
+          last_propagate_off_end = wall_millis(); // cooldown reference time
         } else {
           enter_idle_sleep();
         }
@@ -576,7 +633,7 @@ int main(void) {
     uint8_t rx;
     if (decode_frame(rx)) {
 
-      uint32_t now_ms = millis();
+      uint32_t now_ms = wall_millis();
 
       // Bug fix: expire pending if window passed (prevents stale pending state)
       if (pending_command != 0 &&
