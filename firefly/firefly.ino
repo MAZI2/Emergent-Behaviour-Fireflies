@@ -94,6 +94,7 @@ uint32_t pending_command_time = 0;
 #define JUMP_TO_FLASH_MARGIN    16
 
 // ===== AUDIO PARAMETERS =====
+#define BUZZER_ENABLED          0
 #define CHIRP_BASE_DELAY        175
 #define CHIRP_STEPS             8
 #define CHIRP_CYCLES_PER_STEP   20
@@ -467,6 +468,7 @@ void delay_us_custom(uint16_t us) {
 }
 
 void chirp(void) {
+#if BUZZER_ENABLED
   uint16_t delay_val = CHIRP_BASE_DELAY;
   for (uint8_t c = 0; c < CHIRP_STEPS; c++) {
     for (uint8_t i = 0; i < CHIRP_CYCLES_PER_STEP; i++) {
@@ -479,6 +481,9 @@ void chirp(void) {
     if (delay_val < CHIRP_MIN_DELAY) delay_val = CHIRP_MIN_DELAY;
     delay(CHIRP_PAUSE_MS);
   }
+#else
+  PORTB &= ~(1 << BUZZER);
+#endif
 }
 
 void half_chirp() {
@@ -488,12 +493,16 @@ void half_chirp() {
   strip.setPixelColor(0, strip.Color(0, 0, 0));
   strip.show();
 
+#if BUZZER_ENABLED
   for (uint8_t i = 0; i < 5; i++) {
     PORTB |= (1 << BUZZER);
     delay_us_custom(100);
     PORTB &= ~(1 << BUZZER);
     delay_us_custom(100);
   }
+#else
+  PORTB &= ~(1 << BUZZER);
+#endif
 }
 
 void set_fade_color(uint16_t phase, uint32_t /*diff*/) {
@@ -574,11 +583,7 @@ int main(void) {
           phase += PHASE_STEP;
           if (phase > PHASE_MAX) phase = PHASE_MAX;
 
-          uint8_t r = 0;
-          uint8_t g = 0;
-          uint8_t b = (uint16_t)phase * 255 / PHASE_MAX;
-          strip.setPixelColor(0, strip.Color(g, r, b));  // GRB order
-          strip.show();
+          set_fade_color(phase, (now - red_timer));
 
           if ((phase >= (PHASE_MAX / 2)) && !half_chirped) {
             half_chirp();

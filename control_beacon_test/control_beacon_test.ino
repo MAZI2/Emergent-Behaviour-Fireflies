@@ -18,6 +18,8 @@ Adafruit_NeoPixel strip(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 #define QUIET_DURATION_MS  (6UL * 60000UL)
 #define CYCLE_DURATION_MS  ((BURST_DURATION_MS + QUIET_DURATION_MS) * 2UL)
 
+#define START_WITH_TURN_OFF 1
+
 #define FRAME_SPACING_MS  25
 
 #define IR_TX PB1
@@ -110,12 +112,26 @@ int main(void) {
       cycle_elapsed = 0;
     }
 
-    bool emit_on =
+    bool first_burst =
       cycle_elapsed < BURST_DURATION_MS;
 
-    bool emit_off =
+    bool second_burst =
       cycle_elapsed >= (BURST_DURATION_MS + QUIET_DURATION_MS) &&
       cycle_elapsed <  (BURST_DURATION_MS + QUIET_DURATION_MS + BURST_DURATION_MS);
+
+    bool emit_off =
+#if START_WITH_TURN_OFF
+      first_burst;
+#else
+      second_burst;
+#endif
+
+    bool emit_on =
+#if START_WITH_TURN_OFF
+      second_burst;
+#else
+      first_burst;
+#endif
 
     bool in_flood_window = emit_on || emit_off;
     uint8_t current_code = emit_on ? CODE_TURN_ON : CODE_TURN_OFF;
