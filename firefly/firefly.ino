@@ -94,7 +94,7 @@ uint32_t pending_command_time = 0;
 #define JUMP_TO_FLASH_MARGIN    16
 
 // ===== AUDIO PARAMETERS =====
-#define BUZZER_ENABLED          0
+#define BUZZER_ENABLED          1
 #define CHIRP_BASE_DELAY        175
 #define CHIRP_STEPS             8
 #define CHIRP_CYCLES_PER_STEP   20
