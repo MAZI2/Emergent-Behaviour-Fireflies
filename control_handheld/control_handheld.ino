@@ -6,7 +6,7 @@
 
 // Set to true to emit TURN_ON continuously
 // Set to false to emit TURN_OFF continuously
-#define EMIT_ON false
+#define EMIT_ON true
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 

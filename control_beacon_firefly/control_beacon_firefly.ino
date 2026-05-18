@@ -14,7 +14,7 @@ Adafruit_NeoPixel strip(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
-#define ON_PERIOD_MIN     30//180    // after this, switch to OFF phase until power cycle
+#define ON_PERIOD_MIN     180    // after this, switch to OFF phase until power cycle
 
 // ON phase behavior
 #define ON_FLOOD_DURATION      60000UL        // 1 minute
