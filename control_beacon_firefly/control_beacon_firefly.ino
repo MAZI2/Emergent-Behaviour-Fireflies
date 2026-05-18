@@ -14,7 +14,7 @@ Adafruit_NeoPixel strip(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 #define CODE_TURN_ON   0xA5
 #define CODE_TURN_OFF  0x5A
 
-#define ON_PERIOD_MIN     180    // after this, switch to OFF phase until power cycle
+#define ON_PERIOD_MIN     30//180    // after this, switch to OFF phase until power cycle
 
 // ON phase behavior
 #define ON_FLOOD_DURATION      60000UL        // 1 minute
@@ -24,7 +24,8 @@ Adafruit_NeoPixel strip(NUM_PIXELS, RGB_PIN, NEO_GRB + NEO_KHZ800);
 #define OFF_FLOOD_DURATION     60000UL        // 1 minute
 #define OFF_FLOOD_INTERVAL     (5UL * 60000UL)   // every 5 minutes
 
-#define FRAME_SPACING_MS  25
+#define PROPAGATION_INTERVAL_MS   800UL
+#define PROPAGATION_BURSTS          1
 
 #define IR_TX PB1
 #define IR_RX PB0
@@ -200,6 +201,7 @@ int main(void) {
 
   uint32_t phase_start = millis();
   uint32_t last_flood_start = 0;
+  uint32_t last_command_send = millis() - PROPAGATION_INTERVAL_MS;
   uint16_t phase = 0;
   uint8_t last_rx_state = (PINB & (1 << IR_RX));
   uint8_t refractory = 0;
@@ -238,10 +240,20 @@ int main(void) {
     bool in_flood_window = (now - last_flood_start < flood_duration);
 
     // ---------- Are we inside flood window? ----------
-    if (in_flood_window) {
+    if (in_flood_window &&
+        (uint32_t)(now - last_command_send) >= PROPAGATION_INTERVAL_MS) {
 
+      uint32_t t0 = micros();
+
+      for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++) {
         send_code(current_code);
-        delay(FRAME_SPACING_MS);
+      }
+
+      if (in_on_phase) {
+        timer_us += micros() - t0;
+      }
+
+      last_command_send = now;
     }
 
     if (in_on_phase) {
@@ -260,7 +272,9 @@ int main(void) {
         }
 
         if (phase >= PHASE_MAX) {
-          emit_pulse(200);
+          if (!in_flood_window) {
+            emit_pulse(200);
+          }
           chirp();
           phase = 0;
           half_chirped = false;
