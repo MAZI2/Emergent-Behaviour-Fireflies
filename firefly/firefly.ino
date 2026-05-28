@@ -32,19 +32,19 @@
 #include <avr/sleep.h>
 #include <avr/wdt.h>
 
-#define CODE_TURN_ON   0xA5
-#define CODE_TURN_OFF  0x5A
+#define CODE_TURN_ON 0xA5
+#define CODE_TURN_OFF 0x5A
 
 // ---- Propagation timing ----
-#define PROPAGATE_ON_TIME       60000UL   // 60 seconds
-#define PROPAGATE_OFF_TIME      120000UL  // 120 seconds
+#define PROPAGATE_ON_TIME 60000UL   // 60 seconds
+#define PROPAGATE_OFF_TIME 120000UL // 120 seconds
 
-#define PROPAGATION_INTERVAL_MS   800UL   // send every X ms
-#define PROPAGATION_BURSTS          1     // frames per interval
+#define PROPAGATION_INTERVAL_MS 800UL // send every X ms
+#define PROPAGATION_BURSTS 1          // frames per interval
 
 // ---- Cooldowns ----
-#define TURN_ON_COOLDOWN_MS     300000UL  // 5 minutes
-#define TURN_OFF_COOLDOWN_MS    300000UL  // 5 minutes
+#define TURN_ON_COOLDOWN_MS 300000UL  // 5 minutes
+#define TURN_OFF_COOLDOWN_MS 300000UL // 5 minutes
 
 // ---- Confirmation gating ----
 #define COMMAND_CONFIRM_WINDOW_MS 10000UL // 10 seconds
@@ -52,15 +52,21 @@
 // ---- Deep sleep wake handling ----
 // A wake edge can arrive in the middle of a frame. Stay awake briefly so the
 // repeated beacon/relay frames can be decoded after the oscillator restarts.
-#define SLEEP_LISTEN_WINDOW_MS   250UL
+#define SLEEP_LISTEN_WINDOW_MS 250UL
 
 // ---- Watchdog wall-clock while deep sleeping ----
-#define WATCHDOG_SLEEP_TICK_MS  8000UL
+#define WATCHDOG_SLEEP_TICK_MS 8000UL
+
+// ---- Awake-session safety fallback ----
+// If a firefly misses the final TURN_OFF command, force the normal OFF
+// propagation path after 3h 30m from the start of its awake session.
+#define AWAKE_FALLBACK_OFF_MS 12600000UL
 
 // ---- Oscillator tick ----
-#define OSC_TICK_US             2000UL    // 2ms update cadence
+#define OSC_TICK_US 2000UL // 2ms update cadence
 
-enum SystemState {
+enum SystemState
+{
   STATE_SLEEP,
   STATE_PROPAGATE_ON,
   STATE_ACTIVE,
@@ -73,39 +79,43 @@ uint32_t state_timer = 0;
 uint32_t last_propagation_send = 0;
 
 // Cooldown reference times (recorded when propagation windows END)
-uint32_t last_propagate_on_end  = 0;
+uint32_t last_propagate_on_end = 0;
 uint32_t last_propagate_off_end = 0;
 
+// Nonzero while the unit is in an awake session that should eventually
+// self-extinguish even if the explicit TURN_OFF sequence is missed.
+uint32_t awake_session_start = 0;
+
 // Two-hit confirmation state
-uint8_t  pending_command      = 0;  // 0 or CODE_TURN_ON / CODE_TURN_OFF
+uint8_t pending_command = 0; // 0 or CODE_TURN_ON / CODE_TURN_OFF
 uint32_t pending_command_time = 0;
 
 // ===== HARDWARE CONFIGURATION =====
-#define NEOPIXEL_PIN    PB2
-#define NUM_PIXELS      1
-#define IR_TX           PB1
-#define IR_RX           PB0
-#define LED             PB2
-#define BUZZER          PB3
+#define NEOPIXEL_PIN PB2
+#define NUM_PIXELS 1
+#define IR_TX PB1
+#define IR_RX PB0
+#define LED PB2
+#define BUZZER PB3
 
 // ===== BEHAVIOR PARAMETERS =====
-#define EPSILON                 64
-#define PHASE_STEP              1
-#define JUMP_TO_FLASH_MARGIN    16
+#define EPSILON 64
+#define PHASE_STEP 1
+#define JUMP_TO_FLASH_MARGIN 16
 
 // ===== AUDIO PARAMETERS =====
-#define BUZZER_ENABLED          1
-#define CHIRP_BASE_DELAY        175
-#define CHIRP_STEPS             8
-#define CHIRP_CYCLES_PER_STEP   20
-#define CHIRP_DELAY_DECREMENT   5
-#define CHIRP_MIN_DELAY         20
-#define CHIRP_PAUSE_MS          10
+#define BUZZER_ENABLED 1
+#define CHIRP_BASE_DELAY 175
+#define CHIRP_STEPS 8
+#define CHIRP_CYCLES_PER_STEP 20
+#define CHIRP_DELAY_DECREMENT 5
+#define CHIRP_MIN_DELAY 20
+#define CHIRP_PAUSE_MS 10
 
 // ===== TIMING PARAMETERS =====
-#define IR_PULSE_HALF_PERIOD    15
-#define REFRACTORY_FLASH        20
-#define REFRACTORY_TRIGGER      10
+#define IR_PULSE_HALF_PERIOD 15
+#define REFRACTORY_FLASH 20
+#define REFRACTORY_TRIGGER 10
 
 // --- pulse queue ---
 #define PULSE_Q_SIZE 16
@@ -114,22 +124,26 @@ volatile uint8_t q_head = 0;
 volatile uint8_t q_tail = 0;
 
 volatile uint32_t last_edge_us = 0;
-volatile uint8_t last_level = 1;   // TSOP idle HIGH
+volatile uint8_t last_level = 1; // TSOP idle HIGH
 volatile bool reset_decoder_state = false;
 volatile uint32_t slept_wall_ms = 0;
 volatile bool watchdog_woke = false;
 
-ISR(PCINT0_vect) {
+ISR(PCINT0_vect)
+{
   uint8_t level = (PINB & (1 << IR_RX)) ? 1 : 0;
   uint32_t now = micros();
 
-  if (level != last_level) {
+  if (level != last_level)
+  {
     // rising edge = LOW pulse ended
-    if (last_level == 0 && level == 1) {
+    if (last_level == 0 && level == 1)
+    {
       uint16_t w = (uint16_t)(now - last_edge_us);
 
       uint8_t next = (q_head + 1) & (PULSE_Q_SIZE - 1);
-      if (next != q_tail) {         // drop if full
+      if (next != q_tail)
+      { // drop if full
         pulse_q[q_head] = w;
         q_head = next;
       }
@@ -140,19 +154,20 @@ ISR(PCINT0_vect) {
   }
 }
 
-ISR(WDT_vect) {
+ISR(WDT_vect)
+{
   slept_wall_ms += WATCHDOG_SLEEP_TICK_MS;
   watchdog_woke = true;
 }
 
 // ---- color gradients ----
-const uint8_t GRADIENT_START_R[4] = {255, 255,   0, 200};
-const uint8_t GRADIENT_START_G[4] = {135, 255,   0, 210};
-const uint8_t GRADIENT_START_B[4] = {  0,   0, 255,   0};
+const uint8_t GRADIENT_START_R[4] = {255, 255, 0, 200};
+const uint8_t GRADIENT_START_G[4] = {135, 255, 0, 210};
+const uint8_t GRADIENT_START_B[4] = {0, 0, 255, 0};
 
-const uint8_t GRADIENT_END_R[4]   = {  0, 255,   0, 255};
-const uint8_t GRADIENT_END_G[4]   = {  0,   0, 255, 110};
-const uint8_t GRADIENT_END_B[4]   = {  0, 255,   0,   0};
+const uint8_t GRADIENT_END_R[4] = {0, 255, 0, 255};
+const uint8_t GRADIENT_END_G[4] = {0, 0, 255, 110};
+const uint8_t GRADIENT_END_B[4] = {0, 255, 0, 0};
 
 // ===== GLOBAL VARIABLES =====
 Adafruit_NeoPixel strip(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -164,8 +179,8 @@ uint8_t phase_index = 0;
 uint16_t PHASE_MAX = 255;
 
 // ===== TIMING/STATE VARS =====
-uint32_t timer_us = 0;     // oscillator tick reference (micros)
-uint32_t red_timer = 0;    // kept (used in ACTIVE shading)
+uint32_t timer_us = 0;  // oscillator tick reference (micros)
+uint32_t red_timer = 0; // kept (used in ACTIVE shading)
 bool red = false;
 
 // ===== FUNCTION PROTOTYPES =====
@@ -187,11 +202,12 @@ void enable_watchdog_interrupt(void);
 void disable_watchdog(void);
 
 // ======================= HARDWARE SETUP =======================
-void setup_hardware(void) {
+void setup_hardware(void)
+{
   // IR pins
-  DDRB |= (1 << IR_TX);      // IR emitter output
-  DDRB &= ~(1 << IR_RX);     // IR receiver input
-  PORTB |= (1 << IR_RX);     // pull-up on receiver pin
+  DDRB |= (1 << IR_TX);  // IR emitter output
+  DDRB &= ~(1 << IR_RX); // IR receiver input
+  PORTB |= (1 << IR_RX); // pull-up on receiver pin
 
   // LED/buzzer pins
   DDRB |= (1 << LED);
@@ -211,15 +227,17 @@ void setup_hardware(void) {
   strip.show();
 }
 
-void setup_low_power(void) {
+void setup_low_power(void)
+{
   // These peripherals are not used by the show logic. Timer0 stays enabled
   // because Arduino millis()/micros() depend on it while awake.
-  ADCSRA &= ~(1 << ADEN);                    // ADC off
-  ACSR |= (1 << ACD);                        // analog comparator off
+  ADCSRA &= ~(1 << ADEN); // ADC off
+  ACSR |= (1 << ACD);     // analog comparator off
   PRR |= (1 << PRADC) | (1 << PRUSI) | (1 << PRTIM1);
 }
 
-uint32_t wall_millis(void) {
+uint32_t wall_millis(void)
+{
   uint8_t old_sreg = SREG;
   cli();
   uint32_t slept = slept_wall_ms;
@@ -228,12 +246,13 @@ uint32_t wall_millis(void) {
 }
 
 #if defined(WDTCSR)
-  #define FIREFLY_WDT_REG WDTCSR
+#define FIREFLY_WDT_REG WDTCSR
 #else
-  #define FIREFLY_WDT_REG WDTCR
+#define FIREFLY_WDT_REG WDTCR
 #endif
 
-void enable_watchdog_interrupt(void) {
+void enable_watchdog_interrupt(void)
+{
   uint8_t old_sreg = SREG;
   cli();
   wdt_reset();
@@ -243,7 +262,8 @@ void enable_watchdog_interrupt(void) {
   SREG = old_sreg;
 }
 
-void disable_watchdog(void) {
+void disable_watchdog(void)
+{
   uint8_t old_sreg = SREG;
   cli();
   wdt_reset();
@@ -252,7 +272,8 @@ void disable_watchdog(void) {
   SREG = old_sreg;
 }
 
-bool enter_power_down_sleep(void) {
+bool enter_power_down_sleep(void)
+{
   watchdog_woke = false;
   enable_watchdog_interrupt();
 
@@ -261,9 +282,9 @@ bool enter_power_down_sleep(void) {
   cli();
   sleep_enable();
 
-  #if defined(BODS) && defined(BODSE)
-    sleep_bod_disable();
-  #endif
+#if defined(BODS) && defined(BODSE)
+  sleep_bod_disable();
+#endif
 
   sei();
   sleep_cpu();
@@ -275,15 +296,18 @@ bool enter_power_down_sleep(void) {
   return woke_by_watchdog;
 }
 
-void enter_idle_sleep(void) {
+void enter_idle_sleep(void)
+{
   set_sleep_mode(SLEEP_MODE_IDLE);
   sleep_enable();
   sleep_cpu();
   sleep_disable();
 }
 
-void apply_state_entry_outputs(SystemState state) {
-  if (state == STATE_SLEEP || state == STATE_PROPAGATE_OFF) {
+void apply_state_entry_outputs(SystemState state)
+{
+  if (state == STATE_SLEEP || state == STATE_PROPAGATE_OFF)
+  {
     strip.clear();
     strip.show();
     PORTB &= ~(1 << BUZZER);
@@ -291,8 +315,10 @@ void apply_state_entry_outputs(SystemState state) {
 }
 
 // ======================= IR TX LOW LEVEL =======================
-void emit_ir_pulse(uint16_t cycles) {
-  for (uint16_t i = 0; i < cycles; i++) {
+void emit_ir_pulse(uint16_t cycles)
+{
+  for (uint16_t i = 0; i < cycles; i++)
+  {
     PORTB |= (1 << IR_TX);
     delayMicroseconds(IR_PULSE_HALF_PERIOD);
     PORTB &= ~(1 << IR_TX);
@@ -300,13 +326,16 @@ void emit_ir_pulse(uint16_t cycles) {
   }
 }
 
-static inline void mark_us(uint16_t us) {
+static inline void mark_us(uint16_t us)
+{
   uint16_t cycles = us / 30;
-  if (cycles < 1) cycles = 1;
+  if (cycles < 1)
+    cycles = 1;
   emit_ir_pulse(cycles);
 }
 
-static inline void space_us(uint16_t us) {
+static inline void space_us(uint16_t us)
+{
   PORTB &= ~(1 << IR_TX);
   delayMicroseconds(us);
 }
@@ -316,7 +345,8 @@ static inline void space_us(uint16_t us) {
 // 0-bit: 1000 mark + 3000 space
 // 1-bit: 2000 mark + 2000 space
 // End:   6000 space
-void send_code(uint8_t v) {
+void send_code(uint8_t v)
+{
 
   uint8_t inv = ~v;
 
@@ -325,22 +355,30 @@ void send_code(uint8_t v) {
   space_us(3000);
 
   // First byte
-  for (int8_t i = 7; i >= 0; i--) {
-    if (v & (1 << i)) {
+  for (int8_t i = 7; i >= 0; i--)
+  {
+    if (v & (1 << i))
+    {
       mark_us(2000);
       space_us(2000);
-    } else {
+    }
+    else
+    {
       mark_us(1000);
       space_us(3000);
     }
   }
 
   // Second byte (inverted)
-  for (int8_t i = 7; i >= 0; i--) {
-    if (inv & (1 << i)) {
+  for (int8_t i = 7; i >= 0; i--)
+  {
+    if (inv & (1 << i))
+    {
       mark_us(2000);
       space_us(2000);
-    } else {
+    }
+    else
+    {
       mark_us(1000);
       space_us(3000);
     }
@@ -349,12 +387,12 @@ void send_code(uint8_t v) {
   space_us(6000);
 }
 
-
 /*
  * - disable PCINT during transmit to avoid self-reception filling pulse queue
  * - optionally compensate timer_us so oscillator time does not “jump” after long TX block
  */
-void send_code_freeze(uint8_t v, bool compensate_timer) {
+void send_code_freeze(uint8_t v, bool compensate_timer)
+{
   // Disable pin-change interrupt on PB0 while we TX
   PCMSK &= ~(1 << PCINT0);
 
@@ -365,20 +403,24 @@ void send_code_freeze(uint8_t v, bool compensate_timer) {
   // Re-enable receiver PCINT
   PCMSK |= (1 << PCINT0);
 
-  if (compensate_timer) {
+  if (compensate_timer)
+  {
     timer_us += dt;
   }
 }
 
 // ======================= IR RX DECODE =======================
-static inline bool pulse_pop(uint16_t &w) {
-  if (q_tail == q_head) return false;
+static inline bool pulse_pop(uint16_t &w)
+{
+  if (q_tail == q_head)
+    return false;
   w = pulse_q[q_tail];
   q_tail = (q_tail + 1) & (PULSE_Q_SIZE - 1);
   return true;
 }
 
-void reset_ir_receiver_state(void) {
+void reset_ir_receiver_state(void)
+{
   uint32_t now_us = micros();
   uint8_t now_level = (PINB & (1 << IR_RX)) ? 1 : 0;
 
@@ -392,14 +434,16 @@ void reset_ir_receiver_state(void) {
   SREG = old_sreg;
 }
 
-bool decode_frame(uint8_t &out) {
+bool decode_frame(uint8_t &out)
+{
 
   static bool in_frame = false;
   static uint8_t bit_count = 0;
-  static uint16_t value = 0;  // now 16 bits
+  static uint16_t value = 0; // now 16 bits
   static uint32_t last_activity = 0;
 
-  if (reset_decoder_state) {
+  if (reset_decoder_state)
+  {
     in_frame = false;
     bit_count = 0;
     value = 0;
@@ -409,13 +453,16 @@ bool decode_frame(uint8_t &out) {
 
   uint16_t w;
 
-  while (pulse_pop(w)) {
+  while (pulse_pop(w))
+  {
 
     last_activity = micros();
 
     // START detect
-    if (!in_frame) {
-      if (w > 4500 && w < 9000) {
+    if (!in_frame)
+    {
+      if (w > 4500 && w < 9000)
+      {
         in_frame = true;
         bit_count = 0;
         value = 0;
@@ -424,61 +471,72 @@ bool decode_frame(uint8_t &out) {
     }
 
     // Bit width check
-    if (w < 300 || w > 3500) {
+    if (w < 300 || w > 3500)
+    {
       in_frame = false;
       continue;
     }
 
     value <<= 1;
-    if (w > 1500) value |= 1;
+    if (w > 1500)
+      value |= 1;
 
     bit_count++;
 
-    if (bit_count >= 16) {
+    if (bit_count >= 16)
+    {
 
-      uint8_t first  = (value >> 8) & 0xFF;
+      uint8_t first = (value >> 8) & 0xFF;
       uint8_t second = value & 0xFF;
 
       in_frame = false;
 
       // Validate inverted pair
-      if ((uint8_t)~first == second) {
+      if ((uint8_t)~first == second)
+      {
         out = first;
         return true;
       }
 
-      return false;  // reject corrupted frame
+      return false; // reject corrupted frame
     }
   }
 
   // timeout
-  if (in_frame && (micros() - last_activity > 60000UL)) {
+  if (in_frame && (micros() - last_activity > 60000UL))
+  {
     in_frame = false;
   }
 
   return false;
 }
 
-
 // ======================= AUDIO / LED =======================
-void delay_us_custom(uint16_t us) {
-  while (us--) {
-    for (uint8_t i = 0; i < 3; i++) asm volatile("nop");
+void delay_us_custom(uint16_t us)
+{
+  while (us--)
+  {
+    for (uint8_t i = 0; i < 3; i++)
+      asm volatile("nop");
   }
 }
 
-void chirp(void) {
+void chirp(void)
+{
 #if BUZZER_ENABLED
   uint16_t delay_val = CHIRP_BASE_DELAY;
-  for (uint8_t c = 0; c < CHIRP_STEPS; c++) {
-    for (uint8_t i = 0; i < CHIRP_CYCLES_PER_STEP; i++) {
+  for (uint8_t c = 0; c < CHIRP_STEPS; c++)
+  {
+    for (uint8_t i = 0; i < CHIRP_CYCLES_PER_STEP; i++)
+    {
       PORTB |= (1 << BUZZER);
       delay_us_custom(delay_val);
       PORTB &= ~(1 << BUZZER);
       delay_us_custom(delay_val);
     }
     delay_val -= CHIRP_DELAY_DECREMENT;
-    if (delay_val < CHIRP_MIN_DELAY) delay_val = CHIRP_MIN_DELAY;
+    if (delay_val < CHIRP_MIN_DELAY)
+      delay_val = CHIRP_MIN_DELAY;
     delay(CHIRP_PAUSE_MS);
   }
 #else
@@ -486,7 +544,8 @@ void chirp(void) {
 #endif
 }
 
-void half_chirp() {
+void half_chirp()
+{
   strip.setPixelColor(0, strip.Color(0, 123, 0));
   strip.show();
   delay_us_custom(50);
@@ -494,7 +553,8 @@ void half_chirp() {
   strip.show();
 
 #if BUZZER_ENABLED
-  for (uint8_t i = 0; i < 5; i++) {
+  for (uint8_t i = 0; i < 5; i++)
+  {
     PORTB |= (1 << BUZZER);
     delay_us_custom(100);
     PORTB &= ~(1 << BUZZER);
@@ -505,20 +565,22 @@ void half_chirp() {
 #endif
 }
 
-void set_fade_color(uint16_t phase, uint32_t /*diff*/) {
+void set_fade_color(uint16_t phase, uint32_t /*diff*/)
+{
   uint8_t i = phase_index;
 
   uint8_t r = GRADIENT_START_R[i] + ((uint16_t)(GRADIENT_END_R[i] - GRADIENT_START_R[i]) * phase) / PHASE_MAX;
   uint8_t g = GRADIENT_START_G[i] + ((uint16_t)(GRADIENT_END_G[i] - GRADIENT_START_G[i]) * phase) / PHASE_MAX;
   uint8_t b = GRADIENT_START_B[i] + ((uint16_t)(GRADIENT_END_B[i] - GRADIENT_START_B[i]) * phase) / PHASE_MAX;
 
-  strip.setPixelColor(0, strip.Color(g, r, b));  // GRB
+  strip.setPixelColor(0, strip.Color(g, r, b)); // GRB
   strip.show();
 }
 
 // ======================= MAIN =======================
-int main(void) {
-  init();   // Arduino core init (Timer0, micros/millis)
+int main(void)
+{
+  init(); // Arduino core init (Timer0, micros/millis)
   sei();
   setup_hardware();
   setup_low_power();
@@ -532,148 +594,201 @@ int main(void) {
 
   timer_us = micros();
 
-  while (1) {
+  while (1)
+  {
 
-    if (system_state != previous_state) {
+    if (system_state != previous_state)
+    {
       previous_state = system_state;
       apply_state_entry_outputs(system_state);
     }
 
+    uint32_t loop_now_ms = wall_millis();
+
+    if (awake_session_start != 0 &&
+        (system_state == STATE_PROPAGATE_ON || system_state == STATE_ACTIVE) &&
+        (uint32_t)(loop_now_ms - awake_session_start) >= AWAKE_FALLBACK_OFF_MS)
+    {
+
+      system_state = STATE_PROPAGATE_OFF;
+
+      // Treat the fallback like a confirmed OFF command: outputs off now,
+      // then relay TURN_OFF for the normal propagation window.
+      apply_state_entry_outputs(system_state);
+      pending_command = 0;
+      pending_command_time = 0;
+      awake_session_start = 0;
+      state_timer = loop_now_ms;
+      last_propagation_send = loop_now_ms;
+    }
+
     // ---------- STATE MACHINE ----------
-    switch (system_state) {
+    switch (system_state)
+    {
 
-      case STATE_SLEEP: {
-        if ((uint32_t)(millis() - sleep_listen_until) >= SLEEP_LISTEN_WINDOW_MS) {
-          reset_ir_receiver_state();
-          bool woke_by_watchdog = enter_power_down_sleep();
-          if (!woke_by_watchdog) {
-            sleep_listen_until = millis();
-          }
-          reset_ir_receiver_state();
-        } else {
-          enter_idle_sleep();
+    case STATE_SLEEP:
+    {
+      if ((uint32_t)(millis() - sleep_listen_until) >= SLEEP_LISTEN_WINDOW_MS)
+      {
+        reset_ir_receiver_state();
+        bool woke_by_watchdog = enter_power_down_sleep();
+        if (!woke_by_watchdog)
+        {
+          sleep_listen_until = millis();
         }
-        break;
+        reset_ir_receiver_state();
+      }
+      else
+      {
+        enter_idle_sleep();
+      }
+      break;
+    }
+
+    case STATE_PROPAGATE_ON:
+    {
+
+      // ---- Propagation sending (TURN_ON) ----
+      if ((uint32_t)(wall_millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS)
+      {
+
+        uint32_t t0 = micros();
+
+        for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++)
+        {
+          send_code_freeze(CODE_TURN_ON, false);
+          delay(5);
+        }
+
+        // compensate oscillator time for the blocking TX we just did
+        uint32_t dt = micros() - t0;
+        timer_us += dt;
+
+        last_propagation_send = wall_millis();
       }
 
-      case STATE_PROPAGATE_ON: {
+      // ---- oscillator engine (same cadence as ACTIVE, but no phase-sync + no IR flash) ----
+      uint32_t now = micros();
+      if ((uint32_t)(now - timer_us) >= OSC_TICK_US)
+      {
+        timer_us = now;
 
-        // ---- Propagation sending (TURN_ON) ----
-        if ((uint32_t)(wall_millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
+        phase += PHASE_STEP;
+        if (phase > PHASE_MAX)
+          phase = PHASE_MAX;
 
-          uint32_t t0 = micros();
+        set_fade_color(phase, (now - red_timer));
 
-          for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++) {
-            send_code_freeze(CODE_TURN_ON, false);
-            delay(5);
-          }
-
-          // compensate oscillator time for the blocking TX we just did
-          uint32_t dt = micros() - t0;
-          timer_us += dt;
-
-          last_propagation_send = wall_millis();
+        if ((phase >= (PHASE_MAX / 2)) && !half_chirped)
+        {
+          half_chirp();
+          half_chirped = true;
         }
 
-        // ---- oscillator engine (same cadence as ACTIVE, but no phase-sync + no IR flash) ----
-        uint32_t now = micros();
-        if ((uint32_t)(now - timer_us) >= OSC_TICK_US) {
-          timer_us = now;
-
-          phase += PHASE_STEP;
-          if (phase > PHASE_MAX) phase = PHASE_MAX;
-
-          set_fade_color(phase, (now - red_timer));
-
-          if ((phase >= (PHASE_MAX / 2)) && !half_chirped) {
-            half_chirp();
-            half_chirped = true;
-          }
-
-          if (phase >= PHASE_MAX) {
-            chirp();
-            phase = 0;
-            half_chirped = false;
-          }
-        }
-
-        // ---- Transition to ACTIVE ----
-        if ((uint32_t)(wall_millis() - state_timer) >= PROPAGATE_ON_TIME) {
-          system_state = STATE_ACTIVE;
-          last_propagate_on_end = wall_millis(); // cooldown reference time
-
-          timer_us = micros();
+        if (phase >= PHASE_MAX)
+        {
+          chirp();
+          phase = 0;
           half_chirped = false;
-          refractory = 0;
         }
-
-        break;
       }
 
-      case STATE_ACTIVE:
-        // handled in the “ACTIVE loop” below
-        break;
+      // ---- Transition to ACTIVE ----
+      if ((uint32_t)(wall_millis() - state_timer) >= PROPAGATE_ON_TIME)
+      {
+        system_state = STATE_ACTIVE;
+        last_propagate_on_end = wall_millis(); // cooldown reference time
 
-      case STATE_PROPAGATE_OFF: {
-        if ((uint32_t)(wall_millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS) {
-          for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++) {
-            send_code_freeze(CODE_TURN_OFF, false);
-            delay(5);
-          }
-          last_propagation_send = wall_millis();
-        }
-
-        if ((uint32_t)(wall_millis() - state_timer) >= PROPAGATE_OFF_TIME) {
-          system_state = STATE_SLEEP;
-          last_propagate_off_end = wall_millis(); // cooldown reference time
-        } else {
-          enter_idle_sleep();
-        }
-
-        break;
+        timer_us = micros();
+        half_chirped = false;
+        refractory = 0;
       }
+
+      break;
+    }
+
+    case STATE_ACTIVE:
+      // handled in the “ACTIVE loop” below
+      break;
+
+    case STATE_PROPAGATE_OFF:
+    {
+      if ((uint32_t)(wall_millis() - last_propagation_send) >= PROPAGATION_INTERVAL_MS)
+      {
+        for (uint8_t i = 0; i < PROPAGATION_BURSTS; i++)
+        {
+          send_code_freeze(CODE_TURN_OFF, false);
+          delay(5);
+        }
+        last_propagation_send = wall_millis();
+      }
+
+      if ((uint32_t)(wall_millis() - state_timer) >= PROPAGATE_OFF_TIME)
+      {
+        system_state = STATE_SLEEP;
+        last_propagate_off_end = wall_millis(); // cooldown reference time
+        awake_session_start = 0;
+      }
+      else
+      {
+        enter_idle_sleep();
+      }
+
+      break;
+    }
     }
 
     // ---------- ALWAYS: decode frames ----------
     uint8_t rx;
-    if (decode_frame(rx)) {
+    if (decode_frame(rx))
+    {
 
       uint32_t now_ms = wall_millis();
 
       // Bug fix: expire pending if window passed (prevents stale pending state)
       if (pending_command != 0 &&
-          (uint32_t)(now_ms - pending_command_time) > COMMAND_CONFIRM_WINDOW_MS) {
+          (uint32_t)(now_ms - pending_command_time) > COMMAND_CONFIRM_WINDOW_MS)
+      {
         pending_command = 0;
         pending_command_time = 0;
       }
 
       bool is_valid_command = (rx == CODE_TURN_ON) || (rx == CODE_TURN_OFF);
 
-      if (is_valid_command) {
+      if (is_valid_command)
+      {
 
         // confirmed if same command repeats within window
         if (pending_command == rx &&
-            (uint32_t)(now_ms - pending_command_time) <= COMMAND_CONFIRM_WINDOW_MS) {
+            (uint32_t)(now_ms - pending_command_time) <= COMMAND_CONFIRM_WINDOW_MS)
+        {
 
           // confirmed: clear pending
           pending_command = 0;
           pending_command_time = 0;
 
           // -------- TURN ON confirmed --------
-          if (rx == CODE_TURN_ON) {
+          if (rx == CODE_TURN_ON)
+          {
 
             bool recently_propagated =
-              (last_propagate_on_end != 0) &&
-              ((uint32_t)(now_ms - last_propagate_on_end) < TURN_ON_COOLDOWN_MS);
+                (last_propagate_on_end != 0) &&
+                ((uint32_t)(now_ms - last_propagate_on_end) < TURN_ON_COOLDOWN_MS);
 
             if (!recently_propagated &&
-                (system_state == STATE_SLEEP || system_state == STATE_ACTIVE)) {
+                (system_state == STATE_SLEEP || system_state == STATE_ACTIVE))
+            {
 
               system_state = STATE_PROPAGATE_ON;
 
               // clear pending when acting (prevents cross-state accidental confirms)
               pending_command = 0;
               pending_command_time = 0;
+
+              if (awake_session_start == 0)
+              {
+                awake_session_start = now_ms;
+              }
 
               state_timer = now_ms;
               last_propagation_send = now_ms;
@@ -686,28 +801,32 @@ int main(void) {
           }
 
           // -------- TURN OFF confirmed --------
-          if (rx == CODE_TURN_OFF) {
+          if (rx == CODE_TURN_OFF)
+          {
 
             bool recently_propagated =
-              (last_propagate_off_end != 0) &&
-              ((uint32_t)(now_ms - last_propagate_off_end) < TURN_OFF_COOLDOWN_MS);
+                (last_propagate_off_end != 0) &&
+                ((uint32_t)(now_ms - last_propagate_off_end) < TURN_OFF_COOLDOWN_MS);
 
             // Symmetry: allow OFF propagation from SLEEP or ACTIVE (after cooldown)
             if (!recently_propagated &&
-                (system_state == STATE_SLEEP || system_state == STATE_ACTIVE)) {
+                (system_state == STATE_SLEEP || system_state == STATE_ACTIVE))
+            {
 
               system_state = STATE_PROPAGATE_OFF;
 
               // clear pending when acting
               pending_command = 0;
               pending_command_time = 0;
+              awake_session_start = 0;
 
               state_timer = now_ms;
               last_propagation_send = now_ms;
             }
           }
-
-        } else {
+        }
+        else
+        {
           // First hit OR different valid command (opposite command resets chain)
           pending_command = rx;
           pending_command_time = now_ms;
@@ -719,23 +838,28 @@ int main(void) {
     }
 
     // ---------- ACTIVE oscillator + phase shift listening ----------
-    if (system_state == STATE_ACTIVE) {
+    if (system_state == STATE_ACTIVE)
+    {
       uint32_t now = micros();
-      if ((uint32_t)(now - timer_us) >= OSC_TICK_US) {
+      if ((uint32_t)(now - timer_us) >= OSC_TICK_US)
+      {
         timer_us = now;
 
         set_fade_color(phase, (now - red_timer));
 
         // Advance phase
         phase += PHASE_STEP;
-        if (phase > PHASE_MAX) phase = PHASE_MAX;
+        if (phase > PHASE_MAX)
+          phase = PHASE_MAX;
 
-        if ((phase >= (PHASE_MAX / 2)) && !half_chirped) {
+        if ((phase >= (PHASE_MAX / 2)) && !half_chirped)
+        {
           half_chirp();
           half_chirped = true;
         }
 
-        if (phase >= PHASE_MAX) {
+        if (phase >= PHASE_MAX)
+        {
           emit_ir_pulse(200);
           chirp();
           phase = 0;
@@ -746,25 +870,32 @@ int main(void) {
         // Phase-shift listening (only in ACTIVE)
         uint8_t current_rx = (PINB & (1 << IR_RX));
 
-        if (last_rx_state && !current_rx && refractory == 0) {
-          if (phase > (PHASE_MAX / 4)) {
+        if (last_rx_state && !current_rx && refractory == 0)
+        {
+          if (phase > (PHASE_MAX / 4))
+          {
             uint16_t delta = ((uint32_t)EPSILON * (PHASE_MAX - phase)) / PHASE_MAX;
             phase += delta;
-            if (phase > PHASE_MAX) phase = PHASE_MAX;
+            if (phase > PHASE_MAX)
+              phase = PHASE_MAX;
 
-            if ((PHASE_MAX - phase) < JUMP_TO_FLASH_MARGIN) {
+            if ((PHASE_MAX - phase) < JUMP_TO_FLASH_MARGIN)
+            {
               emit_ir_pulse(200);
               chirp();
               phase = 0;
               half_chirped = false;
               refractory = REFRACTORY_FLASH;
-            } else {
+            }
+            else
+            {
               refractory = REFRACTORY_TRIGGER;
             }
           }
         }
 
-        if (refractory > 0) refractory--;
+        if (refractory > 0)
+          refractory--;
         last_rx_state = current_rx;
       }
     }
