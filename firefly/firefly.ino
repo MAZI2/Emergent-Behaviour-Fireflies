@@ -36,7 +36,7 @@
 #define CODE_TURN_OFF 0x5A
 
 // ---- Propagation timing ----
-#define PROPAGATE_ON_TIME 60000UL   // 60 seconds
+#define PROPAGATE_ON_TIME 120000UL  // 120 seconds
 #define PROPAGATE_OFF_TIME 120000UL // 120 seconds
 
 #define PROPAGATION_INTERVAL_MS 800UL // send every X ms
@@ -52,7 +52,7 @@
 // ---- Deep sleep wake handling ----
 // A wake edge can arrive in the middle of a frame. Stay awake briefly so the
 // repeated beacon/relay frames can be decoded after the oscillator restarts.
-#define SLEEP_LISTEN_WINDOW_MS 250UL
+#define SLEEP_LISTEN_WINDOW_MS 1000UL
 
 // ---- Watchdog wall-clock while deep sleeping ----
 #define WATCHDOG_SLEEP_TICK_MS 8000UL
